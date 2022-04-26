@@ -1,0 +1,5 @@
+# request type
+ros_stuff/RobotCmd robot_cmd
+---
+# response type
+std_msgs/Time time
