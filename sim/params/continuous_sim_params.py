@@ -1,0 +1,15 @@
+TRAINING_MAX_MAGNITUDE = 20.0
+MAGNITUDE = 1.0
+
+SQRT_N_THREADS = 100
+N_THREADS = SQRT_N_THREADS ** 2
+N_STEPS = 1000
+
+DATA_PATH = "/Users/Obsidian/Desktop/eecs106b/projects/MPCDynamicsKamigami/sim/data/"
+
+STOCHASTIC = True
+NOISE_STD = 1.5
+
+LIMIT = True
+MIN_STATE = 0.0
+MAX_STATE = 100.0

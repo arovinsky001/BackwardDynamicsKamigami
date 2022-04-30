@@ -11,13 +11,10 @@ from torch import nn
 from torch.nn import functional as F
 from torch import tensor
 from tqdm import trange
+from time import time
 
-# discrete gridworld actions
-LEFT = -1
-RIGHT = 1
-UP = -10
-DOWN = 10
-possible_actions = np.array([LEFT, RIGHT, UP, DOWN])
+from sim.params.continuous_sim_params import *
+from sim.params.discrete_sim_params import *
 
 def to_tensor(*args):
     ret = []
@@ -29,19 +26,24 @@ def to_tensor(*args):
     return ret
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, state_range, action_range, hidden_dim=512, lr=7e-4, delta=False):
+    def __init__(self, state_dim, action_dim, hidden_dim=512, lr=7e-4, delta=False, dist=False):
         super(DynamicsNetwork, self).__init__()
-        # self.flatten = nn.Flatten()
+        input_dim = state_dim + action_dim
+        output_dim = state_dim * 2 if dist else state_dim
         self.model = nn.Sequential(
-            nn.Linear(state_range.shape[1] + action_range.shape[1], hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
+            # nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            # nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, state_range.shape[1]),
+            nn.Linear(hidden_dim, output_dim),
+            # nn.Dropout(p=0.007),
         )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss(reduction='none')
         self.delta = delta
+        self.dist = dist
         self.trained = False
         self.input_scaler = None
         self.output_scaler = None
@@ -52,20 +54,36 @@ class DynamicsNetwork(nn.Module):
             state = state[:, None]
         if len(action.shape) == 1:
             action = action[:, None]
+
         state_action = torch.cat([state, action], dim=-1).float()
-        # state_action = self.flatten(state_action)
-        pred = self.model(state_action)
-        return pred
+        if self.dist:
+            mean_std = self.model(state_action)
+            mean = mean_std[:, :int(mean_std.shape[1]/2)]
+            std = mean_std[:, int(mean_std.shape[1]/2):]
+            std = torch.clamp(std, min=1e-6)
+            return torch.distributions.normal.Normal(mean, std)
+        else:
+            pred = self.model(state_action)
+            return pred
+        
 
     def update(self, state, action, next_state, retain_graph=False):
         state, action, next_state = to_tensor(state, action, next_state)
-
-        if self.delta:
-            state_delta = self(state, action)
-            losses = self.loss_fn(state + state_delta, next_state)
+        
+        if self.dist:
+            dist = self(state, action)
+            prediction = dist.rsample()
+            if self.delta:
+                losses = self.loss_fn(state + prediction, next_state)
+            else:
+                losses = self.loss_fn(prediction, next_state)
         else:
-            pred_next_state = self(state, action)
-            losses = self.loss_fn(pred_next_state, next_state)
+            if self.delta:
+                state_delta = self(state, action)
+                losses = self.loss_fn(state + state_delta, next_state)
+            else:
+                pred_next_state = self(state, action)
+                losses = self.loss_fn(pred_next_state, next_state)
         loss = losses.mean()
 
         self.optimizer.zero_grad()
@@ -92,21 +110,21 @@ class DynamicsNetwork(nn.Module):
             return next_states_scaled
 
 class MPCAgent:
-    def __init__(self, state_range, action_range, discrete=False, delta=False, hidden_dim=512, lr=7e-4):
-        self.model = DynamicsNetwork(state_range, action_range, hidden_dim=hidden_dim, lr=lr, delta=delta)
-        self.state_range = state_range.astype("int32")
-        self.action_range = action_range.astype("int32")
-        self.action_dim = action_range.shape[1]
+    def __init__(self, state_dim, action_dim, discrete=False, delta=False, dist=False, hidden_dim=512, lr=7e-4):
+        self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, delta=delta, dist=dist)
+        self.action_dim = action_dim
         self.loss_fn = nn.MSELoss(reduction='none')
         self.discrete = discrete
         self.delta = delta
+        self.dist = dist
+        self.time = 0
 
-    def mpc_action(self, state, goal, n_steps=10, n_samples=1000):
+    def mpc_action(self, state, goal, state_range, action_range, n_steps=10, n_samples=1000):
         if self.discrete:
             all_actions = np.eye(self.action_dim)[np.random.choice(self.action_dim, size=(n_steps, n_samples))]
         else:
-            scale = self.action_range[1] - self.action_range[0]
-            minimum = self.action_range[0]
+            scale = action_range[1] - action_range[0]
+            minimum = action_range[0]
             all_actions = np.random.rand(n_steps, n_samples, self.action_dim) * scale + minimum
         states = np.tile(state, (n_samples, 1))
         goals = np.tile(goal , (n_samples, 1))
@@ -123,7 +141,11 @@ class MPCAgent:
                         states = tensor(states.reshape(n_samples, 1))
                     else:
                         states_scaled, actions_scaled = self.model.get_scaled(states, actions)
-                        states_delta_scaled = self.model(states_scaled, actions_scaled)
+                        if self.dist:
+                            dist = self.model(states_scaled, actions_scaled)
+                            states_delta_scaled = dist.rsample()
+                        else:
+                            states_delta_scaled = self.model(states_scaled, actions_scaled)
                         states_delta = self.model.output_scaler.inverse_transform(states_delta_scaled)
                         states += states_delta
                 else:
@@ -133,12 +155,16 @@ class MPCAgent:
                         states = tensor(states.reshape(n_samples, 1))
                     else:
                         states_scaled, actions_scaled = self.model.get_scaled(states, actions)
-                        states_scaled = self.model(states_scaled, actions_scaled)
+                        if self.dist:
+                            dist = self.model(states_scaled, actions_scaled)
+                            states_scaled = dist.rsample()
+                        else:
+                            states_scaled = self.model(states_scaled, actions_scaled)
                         states = tensor(self.model.output_scaler.inverse_transform(states_scaled))
             if self.discrete:
-                states = states % self.state_range[1]
+                states = states % state_range[1]
             else:
-                states = np.clip(states, *self.state_range)
+                states = np.clip(states, *state_range)
             all_losses.append(self.loss_fn(states, goals).detach().numpy().mean(axis=-1))
         
         best_idx = np.array(all_losses).sum(axis=0).argmin()
@@ -149,7 +175,7 @@ class MPCAgent:
 
         losses = []
 
-        for i in trange(train_iters):
+        for _ in trange(train_iters):
             data_idx = np.random.choice(len(states), size=batch_size, replace=True)
             train_states, train_actions, train_next_states = states[data_idx], actions[data_idx], next_states[data_idx]
             
@@ -164,8 +190,9 @@ class MPCAgent:
                                     batch_size=batch_size, error_weight=error_weight)
 
             loss_mean = loss.mean()
-            if i % 100 == 0:
+            if time() - self.time > 5:
                 print(f"mean loss: {loss_mean}")
+                self.time = time()
             losses.append(loss_mean)
 
         self.model.trained = True
@@ -184,22 +211,22 @@ class MPCAgent:
         return loss
     
 def optimal_grid_policy(state, goal):
-    next_state = state + possible_actions % 100
-    dist = np.minimum((next_state - goal) % 100, (goal - next_state) % 100)
-    return possible_actions[dist.argmin()]
+    next_state = state + POSSIBLE_ACTIONS % 100
+    distance = np.minimum((next_state - goal) % 100, (goal - next_state) % 100)
+    return POSSIBLE_ACTIONS[distance.argmin()]
     
 def optimal_continuous_policy(state, goal):
     vec = goal - state
-    return np.clip(vec, -10, 10)
+    return np.clip(vec, -MAGNITUDE, MAGNITUDE)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train/load grid agent and do MPC.')
+    parser = argparse.ArgumentParser(description='Train/load agent and do MPC.')
     parser.add_argument('-load_agent_path', type=str,
                         help='path/file to load old agent from')
     parser.add_argument('-save_agent_path', type=str,
                         help='path/file to save newly-trained agent to')
-    parser.add_argument('-new_agent', action='store_true',
+    parser.add_argument('-new_agent', '-n', action='store_true',
                         help='flag to train new agent')
     parser.add_argument('-hidden_dim', type=int, default=512,
                         help='hidden layers dimension')
@@ -216,22 +243,35 @@ if __name__ == '__main__':
     parser.add_argument('-correction_weight', type=int, default=4,
                         help='number of times to retrain on mistaken data')
     parser.add_argument('-discrete', action='store_true',
-                        help='whether or not to train discrete model (on discrete data)')
+                        help='flag to train discrete model (on discrete data)')
+    parser.add_argument('-stochastic', action='store_true',
+                        help='flag to use stochastic transition data')
+    parser.add_argument('-distribution', action='store_true',
+                        help='flag to have the model return a distribution')
+    parser.add_argument('-delta', action='store_true',
+                        help='flag to output state delta')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     if args.discrete:
-        states = np.load('sim/data/discrete/states_one_hot.npz', allow_pickle=True)
-        actions = np.load('sim/data/discrete/actions_one_hot.npz', allow_pickle=True)
-        next_states = np.load('sim/data/discrete/next_states_one_hot.npz', allow_pickle=True)
         agent_path = 'agents/discrete'
+        if args.stochastic:
+            data = np.load("sim/data/data_discrete_stochastic.npz")
+        else:
+            data = np.load("sim/data/data_discrete_deterministic.npz")
     else:
-        states = np.load('sim/data/continuous/states_continuous.npz', allow_pickle=True)
-        actions = np.load('sim/data/continuous/actions_continuous.npz', allow_pickle=True)
-        next_states = np.load('sim/data/continuous/next_states_continuous.npz', allow_pickle=True)
         agent_path = 'agents/continuous'
+        if args.stochastic:
+            data = np.load("sim/data/data_continuous_stochastic.npz")
+        else:
+            data = np.load("sim/data/data_continuous_deterministic.npz")
+        
+    
+    states = data['states']
+    actions = data['actions']
+    next_states = data['next_states']
 
     print('\nDATA LOADED\n')
 
@@ -239,30 +279,19 @@ if __name__ == '__main__':
     agent_path += f"_dim{args.hidden_dim}"
     agent_path += f"_batch{args.batch_size}"
     agent_path += f"_lr{args.learning_rate}"
+    if args.distribution:
+        agent_path += "_distribution"
+    if args.stochastic:
+        agent_path += "_stochastic"
+    if args.delta:
+        agent_path += "_delta"
     if args.correction:
         agent_path += f"_correction{args.correction_weight}"
     agent_path += ".pkl"
 
     if args.new_agent:
-        if args.discrete:
-            states_min = np.zeros(100)
-            states_max = np.ones(100) * 1.0
-            state_range = np.block([[states_min], [states_max]])
-
-            actions_min = np.zeros(4)
-            actions_max = np.ones(4) * 1.0
-            action_range = np.block([[actions_min], [actions_max]])
-        else:
-            states_min = np.zeros(2)
-            states_max = np.ones(2) * 100.0
-            state_range = np.block([[states_min], [states_max]])
-
-            actions_min = np.ones(2) * -10.0
-            actions_max = np.ones(2) * 10.0
-            action_range = np.block([[actions_min], [actions_max]])
-
-        agent = MPCAgent(state_range, action_range, discrete=False,
-                         delta=False, hidden_dim=args.hidden_dim, lr=args.learning_rate)
+        agent = MPCAgent(states.shape[-1], actions.shape[-1], discrete=args.discrete, delta=args.delta, dist=args.distribution,
+                         hidden_dim=args.hidden_dim, lr=args.learning_rate)
 
         agent.model.set_scalers(states, actions, next_states)
         states_scaled, actions_scaled = agent.model.get_scaled(states, actions)
@@ -274,6 +303,7 @@ if __name__ == '__main__':
 
         losses = np.array(losses).squeeze()
         plt.plot(np.arange(len(losses)), losses)
+        plt.yscale('log')
         plt.xlabel('Iterations')
         plt.ylabel('Loss')
         plt.title('(Forward) Dynamics Model Training Loss')
@@ -287,13 +317,33 @@ if __name__ == '__main__':
         with open(agent_path, "rb") as f:
             agent = pkl.load(f)
 
-    # MPC parameters
-    n_steps = 1         # sample trajectory length
-    n_samples = 8000     # number of trajectories to sample
+    if args.discrete:
+        # one hot vectors
+        states_min = np.zeros(100)
+        states_max = np.ones(100)
+        state_range = np.block([[states_min], [states_max]])
 
-    # repeatedly run trials testing the MPC policy against the optimal policy
+        # one hot vectors
+        actions_min = np.zeros(4)
+        actions_max = np.ones(4)
+        action_range = np.block([[actions_min], [actions_max]])
+    else:
+        states_min = np.ones(2) * MIN_STATE
+        states_max = np.ones(2) * MAX_STATE
+        state_range = np.block([[states_min], [states_max]])
+
+        actions_min = np.ones(2) * -MAGNITUDE
+        actions_max = np.ones(2) * MAGNITUDE
+        action_range = np.block([[actions_min], [actions_max]])
+
+    # MPC parameters
+    n_steps = 1         # length per sample trajectory
+    n_samples = 5000    # number of trajectories to sample
+
+    # run trials testing the MPC policy against the optimal policy
     n_trials = 100
-    max_steps = 100
+    max_steps = 200
+    success_threshold = 1.0
     while True:
         optimal_lengths = []
         actual_lengths = []
@@ -302,28 +352,33 @@ if __name__ == '__main__':
         all_actions = []
         all_goals = []
         for trial in trange(n_trials):
-            init_state = np.random.rand(2) * 100
-            goal = np.random.rand(2) * 100
+            init_state = np.random.rand(2) * (MAX_STATE - MIN_STATE) + MIN_STATE
+            goal = np.random.rand(2) * (MAX_STATE - MIN_STATE) + MIN_STATE
+            noises = np.random.normal(loc=0.0, scale=NOISE_STD, size=(max_steps, 2))
 
             state = init_state.copy()
             i = 0
-            while not np.linalg.norm(goal - state) < 1.0:
-                state += optimal_continuous_policy(state, goal)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
-                state = np.clip(state, 0, 100)
+            while not np.linalg.norm(goal - state) < success_threshold:
+                noise = noises[i] if args.stochastic else 0.0
+                state += optimal_continuous_policy(state, goal) + noise
+                if LIMIT:
+                    state = np.clip(state, MIN_STATE, MAX_STATE)
                 i += 1
             optimal_lengths.append(i)
             
             state = init_state.copy()
             j = 0
             states, actions = [], []
-            while not np.linalg.norm(goal - state) < 1.0:
+            while not np.linalg.norm(goal - state) < success_threshold:
                 states.append(state)
                 if j == max_steps:
                     break
-                action = agent.mpc_action(
-                    state, goal, n_steps=n_steps, n_samples=n_samples).detach().numpy()
-                state += action
-                state = np.clip(state, 0, 100)
+                action = agent.mpc_action(state, goal, state_range, action_range,
+                                    n_steps=n_steps, n_samples=n_samples).detach().numpy()
+                noise = noises[j] if args.stochastic else 0.0
+                state += action + noise
+                if LIMIT:
+                    state = np.clip(state, MIN_STATE, MAX_STATE)
                 j += 1
                 actions.append(action)
 
@@ -332,7 +387,7 @@ if __name__ == '__main__':
             all_goals.append(goal)
             actual_lengths.append(j)
 
-            if j == i:
+            if j <= i:
                 optimal += 1
 
         print("\noptimal mean:", np.mean(optimal_lengths))
