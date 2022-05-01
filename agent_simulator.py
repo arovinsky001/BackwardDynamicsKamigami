@@ -70,7 +70,8 @@ class MPCSim:
         plt.grid()
         plt.plot(self.starts[:, 0], self.starts[:, 1], color='r', linestyle='None', marker='>', markersize=7)
         plt.plot(self.goal[0], self.goal[1], color='g', linestyle='None', marker='<', markersize=7)
-        plt.plot(self.states[:, 0], self.states[:, 1], color=self.colors[i], linestyle='None', marker='*', markersize=7)
+        for state, color in zip(self.states, self.colors):
+            plt.plot(state[0], state[1], color=color, linestyle='None', marker='*', markersize=7)
         plt.legend(['Starting State', 'Goal State', 'Current State'])
 
     def run(self, starts, goal, n_agents, n_steps, mpc_steps, mpc_samples, noise_std, interval):
@@ -134,13 +135,13 @@ if __name__ == '__main__':
     agent_path += ".pkl"
     
     fig = plt.figure()
-    n_agents = 3
-    swarm_weight = 0.3
+    n_agents = 4
+    swarm_weight = 0.5
     tolerance = 2.
     sim = MPCSim(agent_path, fig, args.swarm_mode, swarm_weight=swarm_weight,
                  tol=tolerance, n_agents=n_agents)
     # starts = np.random.rand(n_agents, 2) * 100
-    starts = np.array([[10., 10], [10, 40], [40, 10]])
+    starts = np.array([[10., 10], [10, 40], [40, 10], [30, 30]])
     goal = np.array([60., 80])
     # goal = np.random.rand(2) * 100
     n_steps = 200
