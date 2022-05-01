@@ -10,13 +10,18 @@ from matplotlib import animation
 from forward_mpc_agent import *
 from sim.params.continuous_sim_params import *
 
+MODES = ['follow', 'cluster']
+
 class MPCSim:
-    def __init__(self, agent_path, fig, tol=2., n_agents=3):
+    def __init__(self, agent_path, fig, mode, swarm_weight=10., tol=2., n_agents=3):
+        assert mode in MODES
         self.fig = fig
+        self.mode = mode
         self.ani = None
         self.states = None
-        self.starts, self.goals = None, None
+        self.starts, self.goal = None, None
         self.noises = None
+        self.swarm_weight = swarm_weight
         self.dones = np.full(n_agents, False)
         self.tol = tol
         self.state_range = np.array([[MIN_STATE]*2, [MAX_STATE]*2])
@@ -26,20 +31,34 @@ class MPCSim:
         for _ in range(n_agents):
             with open(agent_path, "rb") as f:
                 self.agents.append(pkl.load(f))
+        for i, agent in enumerate(self.agents):
+            for j, neighbor in enumerate(self.agents):
+                if i != j:
+                    agent.neighbors.append(neighbor)
     
     def sim_and_animate(self, step):
-        distances = np.linalg.norm(self.goals - self.states, axis=-1)
+        distances = np.linalg.norm(self.goal - self.states, axis=-1)
         self.dones[distances < self.tol] = True
 
         if np.all(self.dones):
             self.ani = None
             return
+        
+        if self.mode == 'follow':
+            leader_idx = distances.argmin()
+            leader_state = self.states[leader_idx]
 
         for i, agent in enumerate(self.agents):
             if not self.dones[i]:
-                action = agent.mpc_action(self.states[i], self.goals[i], self.state_range,
-                                        self.action_range, n_steps=self.mpc_steps,
-                                        n_samples=self.mpc_samples).detach().numpy()
+                if self.mode == 'follow':
+                    goal = self.goal if i == leader_idx else leader_state
+                    action = agent.mpc_action(self.states[i], goal, self.state_range,
+                                            self.action_range, n_steps=self.mpc_steps,
+                                            n_samples=self.mpc_samples, swarm=False).detach().numpy()
+                elif self.mode == 'cluster':
+                    action = agent.mpc_action(self.states[i], self.goal, self.state_range,
+                                            self.action_range, n_steps=self.mpc_steps,
+                                            n_samples=self.mpc_samples, swarm=True, swarm_weight=self.swarm_weight).detach().numpy()
                 noise = self.noises[i, step]
                 self.states[i] += (action + noise)
 
@@ -49,15 +68,16 @@ class MPCSim:
         plt.xlim(MIN_STATE, MAX_STATE)
         plt.ylim(MIN_STATE, MAX_STATE)
         plt.grid()
-        for i, (start, goal, state) in enumerate(zip(self.starts, self.goals, self.states)):
-            plt.plot(*start, color='r', linestyle='None', marker='>', markersize=7)
-            plt.plot(*goal, color='g', linestyle='None', marker='<', markersize=7)
-            plt.plot(*state, color=self.colors[i], linestyle='None', marker='*', markersize=7)
+        plt.plot(self.starts[:, 0], self.starts[:, 1], color='r', linestyle='None', marker='>', markersize=7)
+        plt.plot(self.goal[0], self.goal[1], color='g', linestyle='None', marker='<', markersize=7)
+        plt.plot(self.states[:, 0], self.states[:, 1], color=self.colors[i], linestyle='None', marker='*', markersize=7)
         plt.legend(['Starting State', 'Goal State', 'Current State'])
 
-    def run(self, starts, goals, n_agents, n_steps, mpc_steps, mpc_samples, noise_std, interval):
-        self.starts, self.goals = starts, goals
+    def run(self, starts, goal, n_agents, n_steps, mpc_steps, mpc_samples, noise_std, interval):
+        self.starts, self.goal = starts, goal
         self.states = self.starts.copy()
+        for i, agent in enumerate(self.agents):
+            agent.state = torch.tensor(starts[i])
         self.mpc_steps, self.mpc_samples = mpc_steps, mpc_samples
         self.noises = np.random.normal(loc=0.0, scale=noise_std, size=(n_agents, n_steps, 2))
         self.ani = animation.FuncAnimation(self.fig, self.sim_and_animate, frames=n_steps, interval=interval, repeat=False)
@@ -92,6 +112,8 @@ if __name__ == '__main__':
                         help='whether or not to use stochastic transition data')
     parser.add_argument('-distribution', action='store_true',
                         help='whether to have the model output a distribution or a direct prediction')
+    parser.add_argument('-swarm_mode', default='cluster',
+                        help="specify swarm mode: 'follow' (the leader) or 'cluster'")
 
     args = parser.parse_args()
     np.random.seed(args.seed)
@@ -113,12 +135,17 @@ if __name__ == '__main__':
     
     fig = plt.figure()
     n_agents = 3
-    sim = MPCSim(agent_path, fig, n_agents=n_agents)
-    starts = np.random.rand(n_agents, 2) * 100
-    goals = np.random.rand(n_agents, 2) * 100
+    swarm_weight = 0.3
+    tolerance = 2.
+    sim = MPCSim(agent_path, fig, args.swarm_mode, swarm_weight=swarm_weight,
+                 tol=tolerance, n_agents=n_agents)
+    # starts = np.random.rand(n_agents, 2) * 100
+    starts = np.array([[10., 10], [10, 40], [40, 10]])
+    goal = np.array([60., 80])
+    # goal = np.random.rand(2) * 100
     n_steps = 200
     mpc_steps = 1
     mpc_samples = 10000
     noise_std = 0.5
     interval = 75
-    sim.run(starts, goals, n_agents, n_steps, mpc_steps, mpc_samples, noise_std, interval)
+    sim.run(starts, goal, n_agents, n_steps, mpc_steps, mpc_samples, noise_std, interval)

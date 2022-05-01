@@ -113,13 +113,16 @@ class MPCAgent:
     def __init__(self, state_dim, action_dim, discrete=False, delta=False, dist=False, hidden_dim=512, lr=7e-4):
         self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, delta=delta, dist=dist)
         self.action_dim = action_dim
-        self.loss_fn = nn.MSELoss(reduction='none')
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.neighbors = []
+        self.state = None
         self.discrete = discrete
         self.delta = delta
         self.dist = dist
         self.time = 0
 
-    def mpc_action(self, state, goal, state_range, action_range, n_steps=10, n_samples=1000):
+    def mpc_action(self, state, goal, state_range, action_range, n_steps=10, n_samples=1000, swarm=False, swarm_weight=0.1):
+        self.state = tensor(state)
         if self.discrete:
             all_actions = np.eye(self.action_dim)[np.random.choice(self.action_dim, size=(n_steps, n_samples))]
         else:
@@ -165,10 +168,25 @@ class MPCAgent:
                 states = states % state_range[1]
             else:
                 states = np.clip(states, *state_range)
-            all_losses.append(self.loss_fn(states, goals).detach().numpy().mean(axis=-1))
+            if swarm:
+                loss = self.swarm_loss(states, goals, n_samples, swarm_weight)
+            else:
+                loss = self.mse_loss(states, goals)
+            all_losses.append(loss.detach().numpy().mean(axis=-1))
         
         best_idx = np.array(all_losses).sum(axis=0).argmin()
         return all_actions[0, best_idx]
+    
+    def swarm_loss(self, states, goals, n_samples, swarm_weight):
+        neighbor_dists = []
+        for neighbor in self.neighbors:
+            neighbor_states = torch.tile(neighbor.state, (n_samples, 1))
+            distance = self.mse_loss(states, neighbor_states)
+            neighbor_dists.append(distance)
+        goal_term = self.mse_loss(states, goals)
+        neighbor_term = torch.stack(neighbor_dists).mean(dim=0) * goal_term.mean() / goals.mean()
+        loss = goal_term + neighbor_term * swarm_weight
+        return loss
 
     def train(self, states, actions, next_states, train_iters=10000, batch_size=256, correction=False, error_weight=4):
         states, actions, next_states = to_tensor(states, actions, next_states)            
