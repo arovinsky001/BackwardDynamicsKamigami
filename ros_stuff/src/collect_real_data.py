@@ -1,6 +1,6 @@
 import numpy as np
 from visualization_msgs.msg import Marker
-from robot_server.srv import CommandAction
+from ros_stuff.srv import CommandAction
 import rospy
 
 MAGNITUDE = 20.0
