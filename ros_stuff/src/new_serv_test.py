@@ -44,7 +44,7 @@ def kami_callback(request):
     motor_right_pwm.value = 0.0
     
     #Getting requested pwm values
-    left_val, right_val, name = request.left_pwm, request.right_pwm, request.name
+    left_val, right_val, name = request.robot_cmd.left_pwm, request.robot_cmd.right_pwm, request.name
     
     # class_name = '{}_class'.format(name)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import numpy as np
 import rospy
+from ros_stuff.msg import RobotCmd
 from ros_stuff.srv import CommandAction  # Import service type
 
 
@@ -16,7 +17,10 @@ def laptop_client():
             serv_name, CommandAction)
         rospy.loginfo('Command kami1')
         # Call cmd service via the proxy
-        kami_proxy(0.5, 0.5)
+        cmd = RobotCmd()
+        cmd.left_pwm = 0.5
+        cmd.right_pwm = 0.5
+        kami_proxy(cmd, 'kami1')
     except rospy.ServiceException as e:
         rospy.loginfo(e)
 
