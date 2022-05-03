@@ -10,7 +10,7 @@ Generate simulated training data using this command:
 
     python -m sim.scripts.continuous_sim
 
-Change simulation parameters in sim/params/*
+Change simulation parameters in sim/scripts/generate_data.py
 
 ---
 

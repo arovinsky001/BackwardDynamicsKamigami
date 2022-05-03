@@ -8,12 +8,12 @@ from matplotlib import pyplot as plt
 from matplotlib import animation
 
 from forward_mpc_agent import *
-from sim.params.continuous_sim_params import *
+from sim.scripts.generate_data import *
 
 MODES = ['follow', 'cluster']
 
 class MPCSim:
-    def __init__(self, agent_path, fig, mode, swarm_weight=10., tol=2., n_agents=3):
+    def __init__(self, agent_path, fig, mode, swarm_weight=0.5, tol=2., n_agents=3):
         assert mode in MODES
         self.fig = fig
         self.mode = mode
@@ -25,7 +25,7 @@ class MPCSim:
         self.dones = np.full(n_agents, False)
         self.tol = tol
         self.state_range = np.array([[MIN_STATE]*2, [MAX_STATE]*2])
-        self.action_range = np.array([[-1]*2, [1]*2]) * MAGNITUDE
+        self.action_range = np.array([[MIN_ACTION]*2, [MAX_ACTION]*2])
         self.colors = ['b', 'm', 'k', 'c', 'y']
         self.agents = []
         for _ in range(n_agents):
@@ -60,9 +60,9 @@ class MPCSim:
                                             self.action_range, n_steps=self.mpc_steps,
                                             n_samples=self.mpc_samples, swarm=True, swarm_weight=self.swarm_weight).detach().numpy()
                 noise = self.noises[i, step]
-                self.states[i] += (action + noise)
+                self.states[i] += FUNCTION(action) + noise
 
-        self.states = np.clip(self.states, MIN_STATE, MAX_STATE)
+        self.states = np.clip(self.states, *self.state_range)
         
         plt.clf()
         plt.xlim(MIN_STATE, MAX_STATE)
@@ -95,8 +95,8 @@ if __name__ == '__main__':
                         help='flag to train new agent')
     parser.add_argument('-hidden_dim', type=int, default=512,
                         help='hidden layers dimension')
-    parser.add_argument('-train_iters', type=int, default=10000,
-                        help='number of training iterations for new agent')
+    parser.add_argument('-epochs', type=int, default=10,
+                        help='number of training epochs for new agent')
     parser.add_argument('-batch_size', type=int, default=128,
                         help='batch size for training new agent')
     parser.add_argument('-learning_rate', type=float, default=7e-4,
@@ -107,22 +107,24 @@ if __name__ == '__main__':
                         help='flag to retrain on mistakes during training')
     parser.add_argument('-correction_weight', type=int, default=4,
                         help='number of times to retrain on mistaken data')
-    parser.add_argument('-discrete', action='store_true',
-                        help='whether or not to train discrete model (on discrete data)')
     parser.add_argument('-stochastic', action='store_true',
-                        help='whether or not to use stochastic transition data')
+                        help='flag to use stochastic transition data')
     parser.add_argument('-distribution', action='store_true',
-                        help='whether to have the model output a distribution or a direct prediction')
+                        help='flag to have the model return a distribution')
+    parser.add_argument('-delta', action='store_true',
+                        help='flag to output state delta')
     parser.add_argument('-swarm_mode', default='cluster',
                         help="specify swarm mode: 'follow' (the leader) or 'cluster'")
+    parser.add_argument('-swarm_weight', type=float, default=0.5,
+                        help='weighting for swarming behavior')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    agent_path = 'agents/discrete' if args.discrete else 'agents/continuous'
+    agent_path = 'agents/'
 
-    agent_path += f"_train{args.train_iters}"
+    agent_path += f"epochs{args.epochs}"
     agent_path += f"_dim{args.hidden_dim}"
     agent_path += f"_batch{args.batch_size}"
     agent_path += f"_lr{args.learning_rate}"
@@ -130,16 +132,17 @@ if __name__ == '__main__':
         agent_path += "_distribution"
     if args.stochastic:
         agent_path += "_stochastic"
+    if args.delta:
+        agent_path += "_delta"
     if args.correction:
         agent_path += f"_correction{args.correction_weight}"
     agent_path += ".pkl"
     
     fig = plt.figure()
     n_agents = 4
-    swarm_weight = 0.5
     tolerance = 2.
-    sim = MPCSim(agent_path, fig, args.swarm_mode, swarm_weight=swarm_weight,
-                 tol=tolerance, n_agents=n_agents)
+    sim = MPCSim(agent_path, fig, mode=args.swarm_mode,
+                 swarm_weight=args.swarm_weight, tol=tolerance, n_agents=n_agents)
     # starts = np.random.rand(n_agents, 2) * 100
     starts = np.array([[10., 10], [10, 40], [40, 10], [30, 30]])
     goal = np.array([60., 80])

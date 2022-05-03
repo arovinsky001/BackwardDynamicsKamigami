@@ -2,14 +2,33 @@ import numpy as np
 from tqdm import trange
 from matplotlib import pyplot as plt
 import matplotlib.cm as cm
+from scipy.interpolate import interp1d
 
-from ..params.continuous_sim_params import *
+SQRT_N_THREADS = 100
+N_THREADS = SQRT_N_THREADS ** 2
+N_STEPS = 1000
 
+DATA_PATH = "/Users/Obsidian/Desktop/eecs106b/projects/MPCDynamicsKamigami/sim/data/"
+
+STOCHASTIC = True
+NOISE_STD = 1.5
+
+LIMIT = True
+MIN_STATE = 0.0
+MAX_STATE = 100.0
+
+MIN_ACTION = 0.0
+MAX_ACTION = 100.0
+
+MIN_STATE_DELTA = -1.0
+MAX_STATE_DELTA = 1.0
+
+actions = [MIN_ACTION, (MIN_ACTION + MAX_ACTION) / 2, MAX_ACTION]
+deltas = [MIN_STATE_DELTA, (MIN_STATE_DELTA + MAX_STATE_DELTA) / 2, MAX_STATE_DELTA]
+FUNCTION = interp1d(actions, deltas, kind='quadratic')
 
 def generate_data(stochastic=False):
-    all_actions = np.random.rand(N_THREADS, N_STEPS, 2)
-    all_actions *= TRAINING_MAX_MAGNITUDE
-    all_actions -= TRAINING_MAX_MAGNITUDE / 2
+    all_actions = np.random.uniform(low=MIN_ACTION, high=MAX_ACTION, size=(N_THREADS, N_STEPS, 2))
 
     if stochastic:
         noise = np.random.normal(loc=0.0, scale=NOISE_STD, size=all_actions.shape)
@@ -24,7 +43,8 @@ def generate_data(stochastic=False):
 
         for i in trange(N_STEPS):
             all_states[:, i] = states
-            states += all_actions[:, i] + noise[:, i] if stochastic else all_actions[:, i]
+            states_delta = FUNCTION(all_actions[:, i])
+            states += states_delta + noise[:, i] if stochastic else states_delta
             states = np.clip(states, MIN_STATE, MAX_STATE)
             all_next_states[:, i] = states
     else:
@@ -38,11 +58,11 @@ def generate_data(stochastic=False):
     print("samples collected:", len(all_states))
     
     suffix = "stochastic" if stochastic else "deterministic"
-    np.savez_compressed(DATA_PATH + f"data_continuous_{suffix}.npz", states=all_states,
+    np.savez_compressed(DATA_PATH + f"data_{suffix}.npz", states=all_states,
                         actions=all_actions, next_states=all_next_states)
 
 def visualize_data(n_steps):
-    data = np.load(DATA_PATH + f"data_continuous_stochastic.npz")
+    data = np.load(DATA_PATH + f"data_stochastic.npz")
     states = data['states'][:n_steps*SQRT_N_THREADS**2:SQRT_N_THREADS**2][:n_steps]
     actions = data['actions'][:n_steps*SQRT_N_THREADS**2:SQRT_N_THREADS**2][:n_steps]
     next_states = data['next_states'][:n_steps*SQRT_N_THREADS**2:SQRT_N_THREADS**2][:n_steps]

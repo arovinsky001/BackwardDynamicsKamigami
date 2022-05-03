@@ -3,10 +3,6 @@ from visualization_msgs.msg import Marker
 from robot_server.srv import CommandAction
 import rospy
 
-MAGNITUDE = 20.0
-SQRT_N_THREADS = 100
-N_ITERS = 1000
-DATA_PATH = "/Users/Obsidian/Desktop/eecs106b/projects/BackwardDynamicsKamigami/sim/data/continuous/"
 TAG_ID = 0
 AVG_STEPS = 5
 
