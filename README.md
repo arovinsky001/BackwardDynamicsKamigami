@@ -34,6 +34,7 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
 )
 </code>
+
 - uncomment / edit this section to look like
 <code>
 add_message_files(
@@ -41,6 +42,7 @@ add_message_files(
    RobotCmd.msg
 )
 </code>
+
 - uncomment / edit this section to look like
 <code>
 add_service_files(
@@ -48,6 +50,7 @@ add_service_files(
    CommandAction.srv
 )
 </code>
+
 - uncomment / edit this section to look like
 <code>
 generate_messages(
