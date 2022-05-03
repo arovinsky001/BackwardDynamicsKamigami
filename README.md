@@ -21,3 +21,37 @@ Run animated simulator in cluster mode using this command:
 Can also use -swarm_mode=follow for follow-the-leader mode
 
 Change simulation parameters in agent_simulator.py
+
+## Kamigami-ROS interface
+### technical notes
+In the CMakeLists.txt, make the following changes
+- uncomment / edit this section to look like
+<code>
+find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  rospy
+  std_msgs
+  message_generation
+)
+</code>
+- uncomment / edit this section to look like
+<code>
+add_message_files(
+   FILES
+   RobotCmd.msg
+)
+</code>
+- uncomment / edit this section to look like
+<code>
+add_service_files(
+   FILES
+   CommandAction.srv
+)
+</code>
+- uncomment / edit this section to look like
+<code>
+generate_messages(
+   DEPENDENCIES
+   std_msgs
+)
+</code>
