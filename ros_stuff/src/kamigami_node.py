@@ -19,57 +19,6 @@ MOTOR_LEFT_PWM = 13 # PWMA - 33, GPIO 13
 MOTOR_LEFT_FW = 22 # AIN2 - 15, GPIO 22
 MOTOR_LEFT_BW = 27 # AIN1 - 13, GPIO 27
 
-# class KamigamiNode():
-#     def __init__(self, name):
-#         self.name = name
-#         self.motor_standby = DigitalOutputDevice(MOTOR_STANDBY)
-#         self.motor_left_pwm = PWMOutputDevice(MOTOR_LEFT_PWM)
-#         self.motor_left_forward = DigitalOutputDevice(MOTOR_LEFT_FW)
-#         self.motor_left_backward = DigitalOutputDevice(MOTOR_LEFT_BW)
-#         self.motor_right_pwm = PWMOutputDevice(MOTOR_RIGHT_PWM)
-#         self.motor_right_forward = DigitalOutputDevice(MOTOR_RIGHT_FW)
-#         self.motor_right_backward = DigitalOutputDevice(MOTOR_RIGHT_BW)
-#         self.ports = [self.motor_standby, self.motor_left_pwm, self.motor_left_forward, self.motor_left_backward,
-#             self.motor_right_pwm, self.motor_right_forward, self.motor_right_backward]
-#         self.motor_standby.on()
-        
-#         self.motor_left_forward.on()
-#         self.motor_left_backward.off()
-#         self.motor_left_pwm.on()
-
-#         self.motor_right_forward.on()
-#         self.motor_right_backward.off()
-#         self.motor_right_pwm.on()
-
-#         self.motor_left_pwm.value = 0.0
-#         self.motor_right_pwm.value = 0.0
-    
-#     def set_pwm(self, left, right):
-#         self.motor_right_pwm.value = right
-#         self.motor_left_pwm.value = left
-    
-#     def turn_off(self):
-#         self.motor_left_pwm.value = 0.0
-#         self.motor_right_pwm.value = 0.0
-#         for port in self.ports:
-#             port.off()
-    
-#     def kami_callback(self, request):
-#         #Getting requested pwm values
-#         left_val, right_val, name = request.left_pwm, request.right_pwm, request.name
-
-#         pub = rospy.Publisher('/{}/cmd_topic'.format(name), String, queue_size=10)
-
-#         r = rospy.Rate(10)
-
-#         while not rospy.is_shutdown():
-#             class_name.set_pwm(left_val, right_val)
-#             pubstr = "kami pwm " + str(left_val) + ", " + str(right_val)
-#             pub.publish(pubstr)
-#             print(rospy.get_name() + ": I sent", pubstr)
-#             pub.publish(cmd)  # Publish to cmd_topic
-#             rate.sleep()
-
 
 def kami_callback(request):
     motor_standby = DigitalOutputDevice(MOTOR_STANDBY)
@@ -95,9 +44,7 @@ def kami_callback(request):
     motor_right_pwm.value = 0.0
     
     #Getting requested pwm values
-    left_val, right_val, name = request.left_pwm, request.right_pwm, request.name
-    
-    # class_name = '{}_class'.format(name)
+    left_val, right_val, name = request.robot_cmd.left_pwm, request.robot_cmd.right_pwm, request.name
 
     pub = rospy.Publisher('/{}/cmd_topic'.format(name), String, queue_size=10)
 
@@ -114,10 +61,6 @@ def kami_callback(request):
         r.sleep()
 
 def robot_server(name):
-    # # Create class instance for specific kamigami
-    # specific_class = '{}_class'.format(name)
-    # specific = KamigamiNode(name)
-
     # Initialize the server node for specific kamigami
     rospy.init_node('{}_robot_server'.format(name))
     # Register service
