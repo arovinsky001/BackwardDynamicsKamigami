@@ -60,7 +60,10 @@ class RealMPC:
             print(f"could not update states, id: {marker.id}")
             import pdb;pdb.set_trace()
 
-        distances = np.linalg.norm(self.goal - self.states, axis=-1)
+        diff = self.goal - self.states
+        dists_xy = np.linalg.norm(diff[:, :-1], axis=-1)
+        dists_theta = np.abs(diff[:, -1])
+        distances = dists_xy + 0.01 * dists_theta
         self.dones[distances < self.tol] = True
         
         if np.all(self.dones):
@@ -81,7 +84,7 @@ class RealMPC:
 if __name__ == '__main__':
     kami_ids = [0, 1]
     agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real.pkl"
-    goal = np.array([0.15, 0.15, None])
+    goal = np.array([0.15, 0.15, 0.0])
     mpc_steps = 2
     mpc_samples = 1000
     r = RealMPC(kami_ids, agent_path, goal, mpc_steps, mpc_samples)
