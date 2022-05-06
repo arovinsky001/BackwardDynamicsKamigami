@@ -62,12 +62,12 @@ class DataCollector:
         # time_action = np.append(1000, action)
         self.stamped_actions.append(time_action)
     
-    def process_raw_data(self, stamped_states, stamped_actions):
-        state_times = stamped_states[:, 0]
-        action_times = stamped_actions[:, 0]
+    def process_raw_data(self):
+        state_times = self.stamped_states[:, 0]
+        action_times = self.stamped_actions[:, 0]
 
-        states = stamped_states[:, 1:]
-        actions = stamped_actions[:, 1:]
+        states = self.stamped_states[:, 1:]
+        actions = self.stamped_actions[:, 1:]
 
         all_states = []
         all_actions = []
@@ -83,12 +83,16 @@ class DataCollector:
             all_states.append(current_state)
             all_actions.append(action)
             all_next_states.append(next_state)
-
-        return all_states, all_actions, all_next_states
+        
+        np.savez_compressed("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.npz",
+                            states=all_states, actions=all_actions, next_states=all_next_states)
 
             
 if __name__ == '__main__':
     dc = DataCollector()
-
-    np.savez_compressed("/home/bvanbuskirk/ros_workspaces/aaron/src/data/stamped_data.npz", stamped_states=dc.stamped_states, stamped_actions=dc.stamped_actions)
     
+    try:
+        dc.process_raw_data()
+    except:
+        print("could not process raw data")
+        import pdb;pdb.set_trace()

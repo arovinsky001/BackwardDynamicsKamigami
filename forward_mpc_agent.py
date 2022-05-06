@@ -276,16 +276,22 @@ if __name__ == '__main__':
                         help='flag to have the model return a distribution')
     parser.add_argument('-delta', action='store_true',
                         help='flag to output state delta')
+    parser.add_argument('-real', action='store_true',
+                        help='flag to use real data')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    agent_path = 'agents/'
-    if args.stochastic:
-        data = np.load("sim/data/data_stochastic.npz")
+    if args.real:
+        agent_path = 'agents/real'
+        data = np.load("sim/data/real_data.npz")
     else:
-        data = np.load("sim/data/data_deterministic.npz")
+        agent_path = 'agents/'
+        if args.stochastic:
+            data = np.load("sim/data/data_stochastic.npz")
+        else:
+            data = np.load("sim/data/data_deterministic.npz")
     
     states = data['states']
     actions = data['actions']
