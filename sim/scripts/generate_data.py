@@ -11,7 +11,7 @@ N_STEPS = 1000
 DATA_PATH = "/Users/Obsidian/Desktop/eecs106b/projects/MPCDynamicsKamigami/sim/data/"
 
 STOCHASTIC = True
-NOISE_STD = 1.5
+NOISE_STD = 0.2
 
 LIMIT = True
 MIN_STATE = 0.0
@@ -23,8 +23,8 @@ MAX_ACTION = 100.0
 MIN_STATE_DELTA = -1.0
 MAX_STATE_DELTA = 1.0
 
-actions = [MIN_ACTION, (MIN_ACTION + MAX_ACTION) / 2, MAX_ACTION]
-deltas = [MIN_STATE_DELTA, (MIN_STATE_DELTA + MAX_STATE_DELTA) / 2, MAX_STATE_DELTA]
+actions = [MIN_ACTION, (MIN_ACTION + MAX_ACTION) / 4, MAX_ACTION]
+deltas = [MIN_STATE_DELTA, (MIN_STATE_DELTA + MAX_STATE_DELTA) / 4, MAX_STATE_DELTA]
 FUNCTION = interp1d(actions, deltas, kind='quadratic')
 
 def generate_data(stochastic=False):

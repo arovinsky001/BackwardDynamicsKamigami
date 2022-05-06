@@ -59,6 +59,10 @@ class MPCSim:
                     action = agent.mpc_action(self.states[i], self.goal, self.state_range,
                                             self.action_range, n_steps=self.mpc_steps,
                                             n_samples=self.mpc_samples, swarm=True, swarm_weight=self.swarm_weight).detach().numpy()
+                else:
+                    action = agent.mpc_action(self.states[i], self.goal, self.state_range,
+                                            self.action_range, n_steps=self.mpc_steps,
+                                            n_samples=self.mpc_samples, swarm=False, swarm_weight=self.swarm_weight).detach().numpy()
                 noise = self.noises[i, step]
                 self.states[i] += FUNCTION(action) + noise
 
@@ -137,6 +141,9 @@ if __name__ == '__main__':
     if args.correction:
         agent_path += f"_correction{args.correction_weight}"
     agent_path += ".pkl"
+
+    if args.load_agent_path:
+        agent_path = args.load_agent_path
     
     fig = plt.figure()
     n_agents = 4
