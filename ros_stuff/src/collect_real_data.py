@@ -13,6 +13,8 @@ AVG_STEPS = 5
 class DataCollector:
     def __init__(self):
         print("started")
+        self.min_action = 0.3
+        self.max_action = 0.7
         self.current_state = np.zeros(3)        # (x, y, theta)
         self.base_state = np.zeros(3)
         self.robot_id = 0
@@ -20,11 +22,9 @@ class DataCollector:
         self.stamped_states = []
         self.stamped_actions = []
         rospy.init_node("data_collector")
-        rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.collect_data)
         rospy.wait_for_service('/kami1/server')
         self.command_action = rospy.ServiceProxy('/kami1/server', CommandAction)
-        self.min_action = np.zeros(2)
-        self.max_action = np.ones(2) * 100
+        rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.collect_data, queue_size=10)
         rospy.spin()
 
     def collect_data(self, msg):
@@ -53,11 +53,16 @@ class DataCollector:
         current_state[2] %= 2 * np.pi
         time_state = np.append(rospy.get_rostime().to_sec(), self.current_state)
         self.stamped_states.append(time_state)
-        action = np.random.rand(2) * (self.max_action - self.min_action) + self.min_action
+        action = np.random.uniform(low=self.min_action, high=self.max_action, size=2)
+        rand_neg = (np.random.rand(2) - 0.5) > 0
+        if len(rand_neg > 0):
+            action[rand_neg] *= -1
+        print(action)
         action_req = RobotCmd()
         action_req.left_pwm = action[0]
         action_req.right_pwm = action[1]
         timestamp = self.command_action(action_req, 'kami1')
+        print("sent action")
         time_action = np.append(timestamp.time.to_sec(), action)
         # time_action = np.append(1000, action)
         self.stamped_actions.append(time_action)
@@ -82,6 +87,7 @@ class DataCollector:
             next_state = states[idx+1:idx+1+AVG_STEPS].mean()
             all_states.append(current_state)
             all_actions.append(action)
+            print("CUR STATE: ", current_state)
             all_next_states.append(next_state)
         
         np.savez_compressed("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.npz",
@@ -92,6 +98,7 @@ if __name__ == '__main__':
     dc = DataCollector()
     
     try:
+        print("started collecting")
         dc.process_raw_data()
     except:
         print("could not process raw data")
