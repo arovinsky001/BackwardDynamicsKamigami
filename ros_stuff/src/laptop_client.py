@@ -3,14 +3,8 @@ import numpy as np
 import rospy
 from ros_stuff.srv import CommandAction  # Import service type
 
-
-def laptop_client():
-    # Initialize the client node
-    rospy.init_node('laptop_client')
-
-    # Get info on positioning from camera & AR tags
-    rospy.Subscriber("visualization_marker", Marker, self.update_cube_pose)
-    rospy.Subscriber("usb_cam/image_raw", Image, self.write_to_bag)
+def client_callback(msg):
+    # Need to write logic for 
     # Return dictionary with kaminame keys and values corresponding to pwm commands
     kami_dict = ...
     # Need to actually write this part later
@@ -29,6 +23,16 @@ def laptop_client():
         except rospy.ServiceException as e:
             rospy.loginfo(e)
 
+def laptop_client():
+    
+    # Get info on positioning from camera & AR tags
+    rospy.Subscriber("/ar_pose", client_callback, queue_size=10)
+
+    rospy.spin()
+
 
 if __name__ == '__main__':
+    # Initialize the client node
+    rospy.init_node('laptop_client')
+
     laptop_client()
