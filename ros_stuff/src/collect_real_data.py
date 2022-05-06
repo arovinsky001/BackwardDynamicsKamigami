@@ -13,7 +13,7 @@ AVG_STEPS = 5
 class DataCollector:
     def __init__(self):
         print("started")
-        self.min_action = 0.3
+        self.min_action = -0.7
         self.max_action = 0.7
         self.current_state = np.zeros(3)        # (x, y, theta)
         self.base_state = np.zeros(3)
@@ -54,9 +54,6 @@ class DataCollector:
         time_state = np.append(rospy.get_rostime().to_sec(), self.current_state)
         self.stamped_states.append(time_state)
         action = np.random.uniform(low=self.min_action, high=self.max_action, size=2)
-        rand_neg = (np.random.rand(2) - 0.5) > 0
-        if len(rand_neg > 0):
-            action[rand_neg] *= -1
         print(action)
         action_req = RobotCmd()
         action_req.left_pwm = action[0]
