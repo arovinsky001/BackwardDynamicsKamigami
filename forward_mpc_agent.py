@@ -284,7 +284,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
 
     if args.real:
-        agent_path = 'agents/real'
+        agent_path = 'agents/real.pkl'
         data = np.load("sim/data/real_data.npz")
     else:
         agent_path = 'agents/'
@@ -299,19 +299,20 @@ if __name__ == '__main__':
 
     print('\nDATA LOADED\n')
 
-    agent_path += f"epochs{args.epochs}"
-    agent_path += f"_dim{args.hidden_dim}"
-    agent_path += f"_batch{args.batch_size}"
-    agent_path += f"_lr{args.learning_rate}"
-    if args.distribution:
-        agent_path += "_distribution"
-    if args.stochastic:
-        agent_path += "_stochastic"
-    if args.delta:
-        agent_path += "_delta"
-    if args.correction:
-        agent_path += f"_correction{args.correction_weight}"
-    agent_path += ".pkl"
+    if not args.real:
+        agent_path += f"epochs{args.epochs}"
+        agent_path += f"_dim{args.hidden_dim}"
+        agent_path += f"_batch{args.batch_size}"
+        agent_path += f"_lr{args.learning_rate}"
+        if args.distribution:
+            agent_path += "_distribution"
+        if args.stochastic:
+            agent_path += "_stochastic"
+        if args.delta:
+            agent_path += "_delta"
+        if args.correction:
+            agent_path += f"_correction{args.correction_weight}"
+        agent_path += ".pkl"
 
     if args.new_agent:
         agent = MPCAgent(states.shape[-1], actions.shape[-1], seed=args.seed,
