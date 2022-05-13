@@ -68,7 +68,7 @@ class DataCollector:
         timestamp = self.command_action(action_req, 'kami1')
         time_action = np.append(timestamp.time, action)
         self.stamped_actions.append(time_action)
-        rospy.sleep(0.3)
+        rospy.sleep(0.05)
     
     def process_raw_data(self):
         stamped_states = np.array(self.stamped_states)

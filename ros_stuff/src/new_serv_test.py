@@ -43,25 +43,23 @@ def kami_callback(request):
     motor_left_pwm.value = 0.0
     motor_right_pwm.value = 0.0
     
-    #Getting requested pwm values
+    # Getting requested pwm values
     left_val, right_val, name = request.robot_cmd.left_pwm, request.robot_cmd.right_pwm, request.name
     
-    # class_name = '{}_class'.format(name)
+    # pub = rospy.Publisher('/{}/cmd_topic'.format(name), String, queue_size=10)
 
-    pub = rospy.Publisher('/{}/cmd_topic'.format(name), String, queue_size=10)
-
-    r = rospy.Rate(10)
-
-    # while not rospy.is_shutdown():
-        # class_name.set_pwm(left_val, right_val)
     motor_right_pwm.value = abs(right_val)
     motor_left_pwm.value = abs(left_val)
-    pubstr = name + " pwm " + str(left_val) + ", " + str(right_val)
-    # pub.publish(pubstr)
-    print(rospy.get_name() + ": I sent", pubstr)
-    # pub.publish(pubstr)  # Publish to cmd_topic
-    # r.sleep()
-    return CommandActionResponse(name, rospy.get_rostime().to_sec())
+    action_time = rospy.get_rostime().to_sec()
+    print(f"{rospy.get_name()}  ||  left_pwm: {left_val}  ||  right_pwm: {right_val}")
+    
+
+    rospy.sleep(0.1)
+    motor_left_pwm.value = 0.0
+    motor_right_pwm.value = 0.0
+    rospy.sleep(0.05)
+
+    return CommandActionResponse(name, action_time)
 
 def robot_server(name):
     # # Create class instance for specific kamigami
