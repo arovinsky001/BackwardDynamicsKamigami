@@ -4,4 +4,4 @@ string name
 ---
 # response type
 string name
-std_msgs/Time time
+float64 time
