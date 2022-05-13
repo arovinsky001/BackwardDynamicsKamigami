@@ -23,7 +23,7 @@ def to_tensor(*args):
             ret.append(tensor(arg.astype('float32'), requires_grad=True))
         else:
             ret.append(arg)
-    return ret
+    return ret if len(ret) > 1 else ret[0]
 
 class DynamicsNetwork(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=512, lr=7e-4, delta=False, dist=False):
@@ -121,27 +121,45 @@ class MPCAgent:
         self.dist = dist
         self.time = 0
 
-    def mpc_action(self, state, goal, state_range, action_range, n_steps=10, n_samples=1000, swarm=False, swarm_weight=0.1):
-        self.state = tensor(state)
-        all_actions = np.random.uniform(low=action_range[0], high=action_range[1],
-                                        size=(n_steps, n_samples, self.action_dim))
-        states = np.tile(state, (n_samples, 1))
-        goals = np.tile(goal, (n_samples, 1))
+    def mpc_action(self, state, init, goal, state_range, action_range, n_steps=10, n_samples=1000,
+                   swarm=False, swarm_weight=0.1, perp_weight=0.0, angle_weight=0.0, forward_weight=0.0):
+        state, init, goal, state_range = to_tensor(state, init, goal, state_range)
+        self.state = state
+        all_actions = torch.empty(n_steps, n_samples, self.action_dim).uniform_(*action_range)
+        states = torch.tile(state, (n_samples, 1))
+        goals = torch.tile(goal, (n_samples, 1))
         states, all_actions, goals = to_tensor(states, all_actions, goals)
-        all_losses = []
+        x1, y1 = init
+        x2, y2 = goal
+        vec_to_goal = goal - init
+        optimal_dot = vec_to_goal / vec_to_goal.norm()
+        perp_denom = vec_to_goal.norm()
+        all_losses = torch.empty(n_steps, n_samples)
 
         for i in range(n_steps):
             actions = all_actions[i]
             with torch.no_grad():
-                states = tensor(self.get_prediction(states, actions))
-            states = np.clip(states, *state_range)
-            if swarm:
-                loss = self.swarm_loss(states, goals, swarm_weight)
-            else:
-                loss = self.mse_loss(states, goals)
-            all_losses.append(loss.detach().numpy().mean(axis=-1))
+                states = self.get_prediction(states, actions)
+            states = torch.clamp(states, *state_range)
+
+            x0, y0 = states.T
+            vecs_to_goal = goals - states
+            actual_dot = vecs_to_goal.T / vecs_to_goal.norm(dim=-1)
+            
+            dist_loss = torch.norm(goals - states, dim=-1)
+            perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom
+            angle_loss = torch.arccos(torch.clamp(optimal_dot @ actual_dot, -1., 1.))
+            forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).reshape(dist_loss.shape)
+            swarm_loss = self.swarm_loss(states, goals) if swarm else 0
+
+            perp_loss = perp_loss.reshape(dist_loss.shape)
+            angle_loss = angle_loss.reshape(dist_loss.shape)
+            forward_loss = forward_loss.reshape(dist_loss.shape)
+
+            all_losses[i] = dist_loss + forward_weight * forward_loss + perp_weight * perp_loss \
+                                + angle_weight * angle_loss + swarm_weight * swarm_loss
         
-        best_idx = np.array(all_losses).sum(axis=0).argmin()
+        best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
     
     def get_prediction(self, states, actions):
@@ -152,30 +170,32 @@ class MPCAgent:
             prediction = self.model.output_scaler.inverse_transform(prediction_scaled.detach())
         else:
             prediction = self.model.output_scaler.inverse_transform(model_output.detach())
-        return states + prediction if self.delta else prediction
+        return to_tensor(states + prediction).float() if self.delta else to_tensor(prediction).float()
 
-    def swarm_loss(self, states, goals, swarm_weight):
-        neighbor_dists = []
-        for neighbor in self.neighbors:
+    def swarm_loss(self, states, goals):
+        neighbor_dists = torch.empty(len(self.neighbors), states.shape[0])
+        for i, neighbor in enumerate(self.neighbors):
             neighbor_states = torch.tile(neighbor.state, (states.shape[0], 1))
-            distance = self.mse_loss(states, neighbor_states)
-            neighbor_dists.append(distance)
-        goal_term = self.mse_loss(states, goals)
-        neighbor_term = torch.stack(neighbor_dists).mean(dim=0) * goal_term.mean() / goals.mean()
-        loss = goal_term + neighbor_term * swarm_weight
+            distance = torch.norm(states - neighbor_states, dim=-1)
+            neighbor_dists[i] = distance
+        goal_term = torch.norm(goals - states, dim=-1)
+        loss = neighbor_dists.mean(dim=0) * goal_term.mean() / goals.mean(dim=0).norm()
         return loss
 
     def train(self, states, actions, next_states, epochs=5, batch_size=256, correction=False, error_weight=4, n_tests=500):
         states, actions, next_states = to_tensor(states, actions, next_states)
         train_states, test_states, train_actions, test_actions, train_next_states, test_next_states \
-            = train_test_split(states, actions, next_states, test_size=0.05, random_state=self.seed)
+            = train_test_split(states, actions, next_states, test_size=0.1, random_state=self.seed)
 
         training_losses = []
         test_losses = []
         test_idx = []
         idx = np.arange(len(train_states))
 
-        n_batches = len(train_states) // batch_size + 1
+        n_batches = len(train_states) / batch_size
+        if int(n_batches) != n_batches:
+            n_batches += 1
+        n_batches = int(n_batches)
         test_interval = epochs * n_batches // n_tests
 
         i = 0
@@ -202,15 +222,14 @@ class MPCAgent:
                 
                 if i % test_interval == 0:
                     with torch.no_grad():
-                        pred_next_states = tensor(self.get_prediction(test_states, test_actions))
+                        pred_next_states = self.get_prediction(test_states, test_actions)
                     test_loss = self.mse_loss(pred_next_states, test_next_states)
                     test_loss_mean = test_loss.mean().detach()
                     test_losses.append(test_loss_mean)
                     test_idx.append(i)
-                
+                    tqdm.write(f"mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
+
                 i += 1
-            
-            tqdm.write(f"mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
 
         self.model.trained = True
         return training_losses, test_losses, test_idx
@@ -285,7 +304,7 @@ if __name__ == '__main__':
 
     if args.real:
         agent_path = 'agents/real.pkl'
-        data = np.load("sim/data/real_data.npz")
+        data = np.load("sim/data/real_data_one.npz")
     else:
         agent_path = 'agents/'
         if args.stochastic:
@@ -327,7 +346,7 @@ if __name__ == '__main__':
                         states_scaled, actions_scaled, next_states_scaled,
                         epochs=args.epochs, batch_size=args.batch_size,
                         correction=args.correction, error_weight=args.correction_weight,
-                        n_tests=500)
+                        n_tests=100)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
@@ -349,13 +368,8 @@ if __name__ == '__main__':
         with open(agent_path, "rb") as f:
             agent = pkl.load(f)
 
-    states_min = np.ones(2) * MIN_STATE
-    states_max = np.ones(2) * MAX_STATE
-    state_range = np.block([[states_min], [states_max]])
-
-    actions_min = np.ones(2) * MIN_ACTION
-    actions_max = np.ones(2) * MAX_ACTION
-    action_range = np.block([[actions_min], [actions_max]])
+    state_range = np.array([MIN_STATE, MAX_STATE])
+    action_range = np.array([MIN_ACTION, MAX_ACTION])
 
     potential_actions = np.linspace(MIN_ACTION, MAX_ACTION, 10000)
     potential_deltas = FUNCTION(potential_actions)
@@ -363,111 +377,216 @@ if __name__ == '__main__':
 
     # MPC parameters
     n_steps = 1         # length per sample trajectory
-    n_samples = 5000    # number of trajectories to sample
+    n_samples = 100    # number of trajectories to sample
+    forward_weight = 0.0
+    perp_weight = 0.0
+    angle_weight = 0.0
 
     # run trials testing the MPC policy against the optimal policy
-    n_trials = 100
+    n_trials = 1000
     max_steps = 200
     success_threshold = 1.0
     plot = False
 
-    n_trials = 2
-    max_steps = 120
-    start = np.array([11.1, 18.7])
-    goal = np.array([90.3, 71.5])
-    optimal_losses = np.empty(max_steps)
-    actual_losses = np.empty((n_trials, max_steps))
-    noises = np.random.normal(loc=0.0, scale=NOISE_STD, size=(max_steps, 2))
-    state = start.copy()
+    # n_trials = 2
+    # max_steps = 120
+    # start = np.array([11.1, 18.7])
+    # goal = np.array([90.3, 71.5])
+    # optimal_losses = np.empty(max_steps)
+    # actual_losses = np.empty((n_trials, max_steps))
+    # noises = np.random.normal(loc=0.0, scale=NOISE_STD, size=(max_steps, 2))
+    # state = start.copy()
 
-    i = 0
-    while not np.linalg.norm(goal - state) < 0.2:
-        optimal_losses[i] = np.linalg.norm(goal - state)
-        noise = noises[i]
-        state += FUNCTION(agent.optimal_policy(state, goal, TABLE)) + noise
-        state = np.clip(state, MIN_STATE, MAX_STATE)
-        i += 1
-    optimal_losses[i:] = np.linalg.norm(goal - state)
+    # i = 0
+    # while not np.linalg.norm(goal - state) < 0.2:
+    #     optimal_losses[i] = np.linalg.norm(goal - state)
+    #     noise = noises[i]
+    #     state += FUNCTION(agent.optimal_policy(state, goal, TABLE)) + noise
+    #     state = np.clip(state, MIN_STATE, MAX_STATE)
+    #     i += 1
+    # optimal_losses[i:] = np.linalg.norm(goal - state)
 
-    for k in trange(n_trials):
-        state = start.copy()
-        i = 0
-        while not np.linalg.norm(goal - state) < 0.2:
-            actual_losses[k, i] = np.linalg.norm(goal - state)
-            noise = noises[i]
-            action = agent.mpc_action(state, goal, state_range, action_range,
-                                    n_steps=n_steps, n_samples=n_samples).detach().numpy()
-            state += FUNCTION(action) + noise
-            state = np.clip(state, MIN_STATE, MAX_STATE)
-            i += 1
-        actual_losses[k, i:] = np.linalg.norm(goal - state)
+    # for k in trange(n_trials):
+    #     state = start.copy()
+    #     i = 0
+    #     while not np.linalg.norm(goal - state) < 0.2:
+    #         actual_losses[k, i] = np.linalg.norm(goal - state)
+    #         noise = noises[i]
+    #         action = agent.mpc_action(state, goal, state_range, action_range,
+    #                                 n_steps=n_steps, n_samples=n_samples).detach().numpy()
+    #         state += FUNCTION(action) + noise
+    #         state = np.clip(state, MIN_STATE, MAX_STATE)
+    #         i += 1
+    #     actual_losses[k, i:] = np.linalg.norm(goal - state)
     
-    plt.plot(np.arange(max_steps), optimal_losses, 'g-', label="Optimal Controller")
-    plt.plot(np.arange(max_steps), actual_losses.mean(axis=0), 'b-', label="MPC Controller")
-    plt.title("Optimal vs MPC Controller Performance")
-    plt.legend()
-    plt.xlabel("Step\n\nstart = [11.1, 18.7], goal = [90.3, 71.5]\nAveraged over 20 MPC runs")
-    plt.ylabel("Distance to Goal")
-    plt.grid()
-    # plt.text(0.5, 0.01, "start = [11.1, 18.7], goal = [90.3, 71.5]", wrap=True, ha='center', fontsize=12)
-    plt.show()
-    set_trace()
+    # plt.plot(np.arange(max_steps), optimal_losses, 'g-', label="Optimal Controller")
+    # plt.plot(np.arange(max_steps), actual_losses.mean(axis=0), 'b-', label="MPC Controller")
+    # plt.title("Optimal vs MPC Controller Performance")
+    # plt.legend()
+    # plt.xlabel("Step\n\nstart = [11.1, 18.7], goal = [90.3, 71.5]\nAveraged over 20 MPC runs")
+    # plt.ylabel("Distance to Goal")
+    # plt.grid()
+    # # plt.text(0.5, 0.01, "start = [11.1, 18.7], goal = [90.3, 71.5]", wrap=True, ha='center', fontsize=12)
+    # plt.show()
+    # set_trace()
+
+
+
+    # perp_weights = np.linspace(0, 5., 3)
+    # angle_weights = np.linspace(0, 1., 3)
+    # forward_weights = np.linspace(0, 1., 3)
+    # init_min, init_max = 20., 22.
+    # goal_min, goal_max = 70., 72.
+    # init_states = np.random.rand(n_trials, 2) * (init_max - init_min) + init_min
+    # goals = np.random.rand(n_trials, 2) * (goal_max - goal_min) + goal_min
+    # noises = np.random.normal(loc=0.0, scale=NOISE_STD, size=(n_trials, max_steps, 2))
+    # results = []
+
+    # optimal_lengths = np.empty(n_trials)
+    # for trial in trange(n_trials, leave=False):
+    #     init_state = init_states[trial]
+    #     goal = goals[trial]
+
+    #     state = init_state.copy()
+    #     i = 0
+    #     while not np.linalg.norm(goal - state) < success_threshold:
+    #         noise = noises[trial, i] if args.stochastic else 0.0
+    #         state += FUNCTION(agent.optimal_policy(state, goal, TABLE)) + noise
+    #         if LIMIT:
+    #             state = np.clip(state, MIN_STATE, MAX_STATE)
+    #         i += 1
+    #     optimal_lengths[trial] = i
+
+    # count = 0
+    # while True:
+    #     for p in perp_weights:
+    #         for a in angle_weights:
+    #             for f in forward_weights:
+    #                 print(f"{count}: f{f}, p{p}, a{a}")
+    #                 count += 1
+    #                 actual_lengths = np.empty(n_trials)
+    #                 optimal = 0
+    #                 # all_states = []
+    #                 # all_actions = []
+    #                 # all_goals = []
+    #                 for trial in trange(n_trials):
+    #                     init_state = init_states[trial]
+    #                     goal = goals[trial]
+                        
+    #                     state = init_state.copy()
+    #                     i = 0
+    #                     states, actions = [], []
+    #                     while not np.linalg.norm(goal - state) < success_threshold:
+    #                         states.append(state)
+    #                         if i == max_steps:
+    #                             break
+    #                         action = agent.mpc_action(state, goal, state_range, action_range,
+    #                                             n_steps=n_steps, n_samples=n_samples, perp_weight=p,
+    #                                             angle_weight=a, forward_weight=f).detach().numpy()
+    #                         noise = noises[trial, i] if args.stochastic else 0.0
+    #                         state += FUNCTION(action) + noise
+    #                         if LIMIT:
+    #                             state = np.clip(state, MIN_STATE, MAX_STATE)
+    #                         i += 1
+    #                         actions.append(action)
+
+    #                     # all_states.append(states)
+    #                     # all_actions.append(actions)
+    #                     # all_goals.append(goal)
+    #                     actual_lengths[trial] = i
+
+    #                     if i <= optimal_lengths[trial]:
+    #                         optimal += 1
+                    
+    #                 actual_lengths = np.array(actual_lengths)
+    #                 results.append(np.abs(optimal_lengths.mean() - actual_lengths.mean()) / optimal_lengths.mean())
+        
+    #     # print("\noptimal mean:", optimal_lengths.mean())
+    #     # print("optimal std:", optimal_lengths.std(), "\n")
+    #     # print("actual mean:", actual_lengths.mean())
+    #     # print("actual std:", actual_lengths.std(), "\n")
+    #     # print("mean error:", np.abs(optimal_lengths.mean() - actual_lengths.mean()) / optimal_lengths.mean())
+    #     # print("optimality rate:", optimal / float(n_trials))
+    #     # print("timeout rate:", (actual_lengths == max_steps).sum() / float(n_trials), "\n")
+        
+    #     # if plot:
+    #     #     plt.hist(optimal_lengths)
+    #     #     plt.plot(optimal_lengths, actual_lengths, 'bo')
+    #     #     plt.xlabel("Optimal Steps to Reach Goal")
+    #     #     plt.ylabel("Actual Steps to Reach Goal")
+    #     #     plt.show()
+    #     print(np.argsort(results))
+    #     set_trace()
+
+
+
+    init_min, init_max = 20., 21.
+    goal_min, goal_max = 70., 71.
+    init_states = np.random.rand(n_trials, 2) * (init_max - init_min) + init_min
+    goals = np.random.rand(n_trials, 2) * (goal_max - goal_min) + goal_min
+    noises = np.random.normal(loc=0.0, scale=NOISE_STD, size=(n_trials, max_steps, 2))
+
+    optimal_lengths = np.empty(n_trials)
+    for trial in trange(n_trials):
+        init_state = init_states[trial]
+        goal = goals[trial]
+
+        state = init_state.copy()
+        i = 0
+        while not np.linalg.norm(goal - state) < success_threshold:
+            noise = noises[trial, i] if args.stochastic else 0.0
+            state += FUNCTION(agent.optimal_policy(state, goal, TABLE)) + noise
+            if LIMIT:
+                state = np.clip(state, MIN_STATE, MAX_STATE)
+            i += 1
+        optimal_lengths[trial] = i
 
     while True:
-        optimal_lengths = []
-        actual_lengths = []
+        actual_lengths = np.empty(n_trials)
         optimal = 0
-        all_states = []
-        all_actions = []
-        all_goals = []
-        for trial in trange(n_trials):
-            init_state = np.random.rand(2) * (MAX_STATE - MIN_STATE) + MIN_STATE
-            goal = np.random.rand(2) * (MAX_STATE - MIN_STATE) + MIN_STATE
-            noises = np.random.normal(loc=0.0, scale=NOISE_STD, size=(max_steps, 2))
-
-            state = init_state.copy()
-            i = 0
-            while not np.linalg.norm(goal - state) < success_threshold:
-                noise = noises[i] if args.stochastic else 0.0
-                state += FUNCTION(optimal_policy(state, goal, TABLE)) + noise
-                if LIMIT:
-                    state = np.clip(state, MIN_STATE, MAX_STATE)
-                i += 1
-            optimal_lengths.append(i)
+        # all_states = []
+        # all_actions = []
+        # all_goals = []
+        for trial in trange(n_trials, leave=False):
+            init_state = init_states[trial]
+            goal = goals[trial]
             
             state = init_state.copy()
-            j = 0
+            i = 0
             states, actions = [], []
             while not np.linalg.norm(goal - state) < success_threshold:
                 states.append(state)
-                if j == max_steps:
+                if i == max_steps:
                     break
-                action = agent.mpc_action(state, goal, state_range, action_range,
-                                    n_steps=n_steps, n_samples=n_samples).detach().numpy()
-                noise = noises[j] if args.stochastic else 0.0
+                action = agent.mpc_action(state, init_state, goal, state_range, action_range,
+                                    n_steps=n_steps, n_samples=n_samples, perp_weight=perp_weight,
+                                    angle_weight=angle_weight, forward_weight=forward_weight).detach().numpy()
+                noise = noises[trial, i] if args.stochastic else 0.0
                 state += FUNCTION(action) + noise
                 if LIMIT:
                     state = np.clip(state, MIN_STATE, MAX_STATE)
-                j += 1
+                i += 1
                 actions.append(action)
 
-            all_states.append(states)
-            all_actions.append(actions)
-            all_goals.append(goal)
-            actual_lengths.append(j)
+            # all_states.append(states)
+            # all_actions.append(actions)
+            # all_goals.append(goal)
+            actual_lengths[trial] = i
 
-            if j <= i:
+            if i <= optimal_lengths[trial]:
                 optimal += 1
         
         optimal_lengths, actual_lengths = np.array(optimal_lengths), np.array(actual_lengths)
-        print("\noptimal mean:", optimal_lengths.mean())
+        print("\n------------------------")
+        print("optimal mean:", optimal_lengths.mean())
         print("optimal std:", optimal_lengths.std(), "\n")
         print("actual mean:", actual_lengths.mean())
         print("actual std:", actual_lengths.std(), "\n")
         print("mean error:", np.abs(optimal_lengths.mean() - actual_lengths.mean()) / optimal_lengths.mean())
         print("optimality rate:", optimal / float(n_trials))
-        print("timeout rate:", (actual_lengths == max_steps).sum() / float(n_trials), "\n")
-        
+        print("timeout rate:", (actual_lengths == max_steps).sum() / float(n_trials))
+        print("------------------------\n")
+
         if plot:
             plt.hist(optimal_lengths)
             plt.plot(optimal_lengths, actual_lengths, 'bo')
