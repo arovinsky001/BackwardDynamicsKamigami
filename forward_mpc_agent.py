@@ -16,6 +16,18 @@ from time import time
 
 from sim.scripts.generate_data import *
 
+# if torch.backends.mps.is_available:
+#     device = torch.device("mps")
+# else:
+#     device = torch.device("cpu")
+device = torch.device("cpu")
+
+def to_device(*args):
+    ret = []
+    for arg in args:
+        ret.append(arg.to(device))
+    return ret
+
 def to_tensor(*args):
     ret = []
     for arg in args:
@@ -25,25 +37,29 @@ def to_tensor(*args):
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
 
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight)
+        m.bias.data.fill_(0.01)
+
 class DynamicsNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=512, lr=7e-4, delta=False, dist=False):
+    def __init__(self, state_dim, action_dim, hidden_dim=512, lr=7e-4, std=0.0, delta=False):
         super(DynamicsNetwork, self).__init__()
         input_dim = state_dim + action_dim
-        output_dim = state_dim * 2 if dist else state_dim
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            # nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
+            nn.Dropout(p=0.8),
             nn.Linear(hidden_dim, hidden_dim),
-            # nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-            # nn.Dropout(p=0.007),
+            nn.Linear(hidden_dim, state_dim),
         )
+        self.model.apply(init_weights)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss(reduction='none')
         self.delta = delta
-        self.dist = dist
+        self.dist = (std > 0)
+        self.std = std
         self.trained = False
         self.input_scaler = None
         self.output_scaler = None
@@ -57,10 +73,8 @@ class DynamicsNetwork(nn.Module):
 
         state_action = torch.cat([state, action], dim=-1).float()
         if self.dist:
-            mean_std = self.model(state_action)
-            mean = mean_std[:, :int(mean_std.shape[1]/2)]
-            std = mean_std[:, int(mean_std.shape[1]/2):]
-            std = torch.clamp(std, min=1e-6)
+            mean = self.model(state_action)
+            std = torch.ones(mean.shape[-1]) * self.std
             return torch.distributions.normal.Normal(mean, std)
         else:
             pred = self.model(state_action)
@@ -110,15 +124,15 @@ class DynamicsNetwork(nn.Module):
             return next_states_scaled
 
 class MPCAgent:
-    def __init__(self, state_dim, action_dim, seed=1, delta=False, dist=False, hidden_dim=512, lr=7e-4):
-        self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, delta=delta, dist=dist)
+    def __init__(self, state_dim, action_dim, seed=1, hidden_dim=512, lr=7e-4, std=0.0, delta=True):
+        self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, std=std, delta=delta)
+        self.model.to(device)
         self.seed = seed
         self.action_dim = action_dim
         self.mse_loss = nn.MSELoss(reduction='none')
         self.neighbors = []
         self.state = None
         self.delta = delta
-        self.dist = dist
         self.time = 0
 
     def mpc_action(self, state, init, goal, state_range, action_range, n_steps=10, n_samples=1000,
@@ -162,15 +176,27 @@ class MPCAgent:
         best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
     
-    def get_prediction(self, states, actions):
-        states_scaled, actions_scaled = self.model.get_scaled(states, actions)
-        model_output = self.model(states_scaled, actions_scaled)
-        if self.dist:
-            prediction_scaled = model_output.rsample()
-            prediction = self.model.output_scaler.inverse_transform(prediction_scaled.detach())
+    def get_prediction(self, states, actions, scale_input=True):
+        if scale_input:
+            states, actions = self.model.get_scaled(states, actions)
+            states, actions = to_tensor(states, actions)
+        states, actions = to_device(states, actions)
+        model_output = self.model(states, actions)
+        if self.model.dist:
+            if self.delta:
+                states_delta_scaled = model_output.loc
+                next_states_scaled = states_delta_scaled + states
+            else:
+                next_states_scaled = model_output.loc
         else:
-            prediction = self.model.output_scaler.inverse_transform(model_output.detach())
-        return to_tensor(states + prediction).float() if self.delta else to_tensor(prediction).float()
+            if self.delta:
+                states_delta_scaled = model_output
+                next_states_scaled = states_delta_scaled + states
+            else:
+                next_states_scaled = model_output.detach()
+        next_states_scaled = next_states_scaled.detach().cpu()
+        next_states = self.model.output_scaler.inverse_transform(next_states_scaled)
+        return to_tensor(next_states).float()
 
     def swarm_loss(self, states, goals):
         neighbor_dists = torch.empty(len(self.neighbors), states.shape[0])
@@ -182,7 +208,7 @@ class MPCAgent:
         loss = neighbor_dists.mean(dim=0) * goal_term.mean() / goals.mean(dim=0).norm()
         return loss
 
-    def train(self, states, actions, next_states, epochs=5, batch_size=256, correction=False, error_weight=4, n_tests=500):
+    def train(self, states, actions, next_states, epochs=5, batch_size=256, correction_iters=0, n_tests=100):
         states, actions, next_states = to_tensor(states, actions, next_states)
         train_states, test_states, train_actions, test_actions, train_next_states, test_next_states \
             = train_test_split(states, actions, next_states, test_size=0.1, random_state=self.seed)
@@ -197,6 +223,7 @@ class MPCAgent:
             n_batches += 1
         n_batches = int(n_batches)
         test_interval = epochs * n_batches // n_tests
+        test_interval = 1 if test_interval == 0 else test_interval
 
         i = 0
         for _ in tqdm(range(epochs), desc="Epoch", position=0, leave=False):
@@ -207,22 +234,21 @@ class MPCAgent:
                 batch_states = torch.autograd.Variable(train_states[j*batch_size:(j+1)*batch_size])
                 batch_actions = torch.autograd.Variable(train_actions[j*batch_size:(j+1)*batch_size])
                 batch_next_states = torch.autograd.Variable(train_next_states[j*batch_size:(j+1)*batch_size])
-
+                batch_states, batch_actions, batch_next_states = to_device(batch_states, batch_actions, batch_next_states)
                 training_loss = self.model.update(batch_states, batch_actions, batch_next_states)
                 if type(training_loss) != float:
                     while len(training_loss.shape) > 1:
                         training_loss = training_loss.sum(axis=-1)
 
-                # if correction:
-                #     training_loss = self.correct(states, actions, next_states, data_idx, training_loss,
-                #                         batch_size=batch_size, error_weight=error_weight)
+                for _ in range(correction_iters):
+                    training_loss = self.correct(batch_states, batch_actions, batch_next_states, training_loss)
 
                 training_loss_mean = training_loss.mean().detach()
                 training_losses.append(training_loss_mean)
                 
                 if i % test_interval == 0:
                     with torch.no_grad():
-                        pred_next_states = self.get_prediction(test_states, test_actions)
+                        pred_next_states = self.get_prediction(test_states, test_actions, scale_input=False)
                     test_loss = self.mse_loss(pred_next_states, test_next_states)
                     test_loss_mean = test_loss.mean().detach()
                     test_losses.append(test_loss_mean)
@@ -234,11 +260,11 @@ class MPCAgent:
         self.model.trained = True
         return training_losses, test_losses, test_idx
 
-    def correct(self, states, actions, next_states, data_idx, loss, batch_size=256, error_weight=4):
+    def correct(self, states, actions, next_states, loss):
+        batch_size = len(states)
         worst_idx = torch.topk(loss.squeeze(), int(batch_size / 10))[1].detach().numpy()
-        train_idx = np.append(data_idx, np.tile(data_idx[worst_idx], (1, error_weight)))
-        train_states, train_actions, train_next_states = states[train_idx], actions[train_idx], next_states[train_idx]
-        loss = self.model.update(train_states, train_actions, train_next_states).detach().numpy()
+        worst_states, worst_actions, worst_next_states = states[worst_idx], actions[worst_idx], next_states[worst_idx]
+        loss = self.model.update(worst_states, worst_actions, worst_next_states)
         
         if type(loss) != float:
             while len(loss.shape) > 1:
@@ -285,14 +311,12 @@ if __name__ == '__main__':
                         help='batch size for training new agent')
     parser.add_argument('-seed', type=int, default=1,
                         help='random seed for numpy and pytorch')
-    parser.add_argument('-correction', action='store_true',
-                        help='flag to retrain on mistakes during training')
-    parser.add_argument('-correction_weight', type=int, default=4,
+    parser.add_argument('-correction_iters', type=int, default=0,
                         help='number of times to retrain on mistaken data')
     parser.add_argument('-stochastic', action='store_true',
                         help='flag to use stochastic transition data')
-    parser.add_argument('-distribution', action='store_true',
-                        help='flag to have the model return a distribution')
+    parser.add_argument('-std', type=float, default=0.0,
+                        help='standard deviation for model distribution')
     parser.add_argument('-delta', action='store_true',
                         help='flag to output state delta')
     parser.add_argument('-real', action='store_true',
@@ -316,6 +340,13 @@ if __name__ == '__main__':
     actions = data['actions']
     next_states = data['next_states']
 
+    if args.real:
+        bad_idx = np.linalg.norm(np.abs(states - next_states)[:, :2], axis=-1) > 0.1
+        bad_idx = np.logical_or(bad_idx, np.linalg.norm(np.abs(states - next_states)[:, :2], axis=-1) < 0.0005)
+        states = states[~bad_idx]
+        actions = actions[~bad_idx]
+        next_states = next_states[~bad_idx]
+
     print('\nDATA LOADED\n')
 
     if not args.real:
@@ -323,20 +354,19 @@ if __name__ == '__main__':
         agent_path += f"_dim{args.hidden_dim}"
         agent_path += f"_batch{args.batch_size}"
         agent_path += f"_lr{args.learning_rate}"
-        if args.distribution:
-            agent_path += "_distribution"
+        if args.std > 0:
+            agent_path += f"_std{args.std}"
         if args.stochastic:
             agent_path += "_stochastic"
         if args.delta:
             agent_path += "_delta"
-        if args.correction:
-            agent_path += f"_correction{args.correction_weight}"
+        if args.correction_iters > 0:
+            agent_path += f"_correction{args.correction_iters}"
         agent_path += ".pkl"
 
     if args.new_agent:
-        agent = MPCAgent(states.shape[-1], actions.shape[-1], seed=args.seed,
-                         delta=args.delta, dist=args.distribution,
-                         hidden_dim=args.hidden_dim, lr=args.learning_rate)
+        agent = MPCAgent(states.shape[-1], actions.shape[-1], seed=args.seed, std=args.std,
+                         delta=args.delta, hidden_dim=args.hidden_dim, lr=args.learning_rate)
 
         agent.model.set_scalers(states, actions, next_states)
         states_scaled, actions_scaled = agent.model.get_scaled(states, actions)
@@ -345,14 +375,13 @@ if __name__ == '__main__':
         training_losses, test_losses, test_idx = agent.train(
                         states_scaled, actions_scaled, next_states_scaled,
                         epochs=args.epochs, batch_size=args.batch_size,
-                        correction=args.correction, error_weight=args.correction_weight,
-                        n_tests=100)
+                        correction_iters=args.correction_iters, n_tests=100)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
         plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
         plt.plot(test_idx, test_losses, label="Test Loss")
-        plt.yscale('log')
+        # plt.yscale('log')
         plt.xlabel('Batch')
         plt.ylabel('Loss')
         plt.title('Dynamics Model Loss')
@@ -360,6 +389,7 @@ if __name__ == '__main__':
         plt.grid()
         plt.show()
         
+        import pdb;pdb.set_trace()
         agent_path = args.save_agent_path if args.save_agent_path else agent_path
         with open(agent_path, "wb") as f:
             pkl.dump(agent, f)
@@ -368,6 +398,11 @@ if __name__ == '__main__':
         with open(agent_path, "rb") as f:
             agent = pkl.load(f)
 
+    for i in range(len(states)):
+        pred = agent.get_prediction(states[None, i], actions[None, i]).detach()
+        print(abs(pred - next_states[i]))
+        set_trace()
+    
     state_range = np.array([MIN_STATE, MAX_STATE])
     action_range = np.array([MIN_ACTION, MAX_ACTION])
 
