@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 import numpy as np
 import rospy
 from ros_stuff.msg import RobotCmd
