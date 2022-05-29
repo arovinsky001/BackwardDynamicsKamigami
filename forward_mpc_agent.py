@@ -143,9 +143,9 @@ class MPCAgent:
         states = torch.tile(state, (n_samples, 1))
         goals = torch.tile(goal, (n_samples, 1))
         states, all_actions, goals = to_tensor(states, all_actions, goals)
-        x1, y1 = init
-        x2, y2 = goal
-        vec_to_goal = goal - init
+        x1, y1, _ = init
+        x2, y2, _ = goal
+        vec_to_goal = (goal - init)[:-1]
         optimal_dot = vec_to_goal / vec_to_goal.norm()
         perp_denom = vec_to_goal.norm()
         all_losses = torch.empty(n_steps, n_samples)
@@ -156,24 +156,27 @@ class MPCAgent:
                 states = self.get_prediction(states, actions)
             states = torch.clamp(states, *state_range)
 
-            x0, y0 = states.T
-            vecs_to_goal = goals - states
+            x0, y0, _ = states.T
+            vecs_to_goal = (goals - states)[:, :-1]
             actual_dot = vecs_to_goal.T / vecs_to_goal.norm(dim=-1)
             
-            dist_loss = torch.norm(goals - states, dim=-1)
-            perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom
+            dist_loss = torch.norm((goals - states)[:, :-1], dim=-1)
+            perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom / dist_loss.mean()
             angle_loss = torch.arccos(torch.clamp(optimal_dot @ actual_dot, -1., 1.))
-            forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).reshape(dist_loss.shape)
+            forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T)
             swarm_loss = self.swarm_loss(states, goals) if swarm else 0
 
             perp_loss = perp_loss.reshape(dist_loss.shape)
             angle_loss = angle_loss.reshape(dist_loss.shape)
             forward_loss = forward_loss.reshape(dist_loss.shape)
+            print("perp:", perp_loss.mean(), "|| forward:", forward_loss.mean(), "|| dist:", dist_loss.mean())
 
-            all_losses[i] = dist_loss + forward_weight * forward_loss + perp_weight * perp_loss \
+            all_losses[i] = dist_loss * 0 + forward_weight * forward_loss + perp_weight * perp_loss \
                                 + angle_weight * angle_loss + swarm_weight * swarm_loss
         
-        best_idx = all_losses.sum(dim=0).argmin()
+        # best_idx = all_losses.sum(dim=0).argmin()
+        best_idx = all_losses[-1].argmin()
+        # import pdb;pdb.set_trace()
         return all_actions[0, best_idx]
     
     def get_prediction(self, states, actions, scale_input=True):
@@ -205,7 +208,7 @@ class MPCAgent:
             distance = torch.norm(states - neighbor_states, dim=-1)
             neighbor_dists[i] = distance
         goal_term = torch.norm(goals - states, dim=-1)
-        loss = neighbor_dists.mean(dim=0) * goal_term.mean() / goals.mean(dim=0).norm()
+        loss = neighbor_dists.mean(dim=0) * goal_term.mean()
         return loss
 
     def train(self, states, actions, next_states, epochs=5, batch_size=256, correction_iters=0, n_tests=100):
