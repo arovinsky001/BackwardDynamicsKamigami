@@ -1,0 +1,3 @@
+[submodule "ros_stuff"]
+	path = ros_stuff
+	url = https://github.com/arovinsky001/ros_stuff.git
