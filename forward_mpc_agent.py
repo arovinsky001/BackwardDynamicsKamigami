@@ -63,7 +63,7 @@ class DynamicsNetwork(nn.Module):
         )
         self.model.apply(init_weights)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss(reduction='none')
         self.delta = delta
         self.dist = (std > 0)
@@ -187,7 +187,6 @@ class MPCAgent:
             # heading computations
             x0, y0, sin_t, cos_t = states.T
             vecs_to_goal = (goals - states)[:, :2]
-            actual_dot = (vecs_to_goal.T / vecs_to_goal.norm(dim=-1)).T
             target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
             target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0])
             current_angle = torch.atan2(sin_t, cos_t)
@@ -207,7 +206,7 @@ class MPCAgent:
             # normalize appropriate losses and compute total loss
             norm_const = dist_loss.mean() / vec_to_goal.norm()
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
-                                + swarm_weight * swarm_loss + norm_weight * norm_loss)
+                                + swarm_weight * swarm_loss + norm_weight * norm_loss) \
                                 + dist_weight * dist_loss + forward_weight * forward_loss
         
         # find index of best trajectory and return corresponding first action
@@ -272,11 +271,11 @@ class MPCAgent:
                     pred_next_states = to_tensor(self.get_prediction(test_states, test_actions))
                 test_loss = self.mse_loss(pred_next_states, test_next_states)
                 test_loss_mean = dcn(test_loss.mean())
-                training_losses.append(np.zeros(1))
                 test_losses.append(test_loss_mean)
                 test_idx.append(i)
                 tqdm.write(f"{i}: mean training loss: {nan} | mean test loss: {test_loss_mean}")
                 self.model.train()
+                continue
 
             for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
                 batch_states = torch.autograd.Variable(train_states[j*batch_size:(j+1)*batch_size])
@@ -362,7 +361,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    np.set_printoptions(suppress=True)
 
     if args.hidden_dim >= 1024:
         if torch.backends.mps.is_available:
@@ -412,7 +410,6 @@ if __name__ == '__main__':
         next_states_theta += pi
         next_states_sin = np.sin(next_states_theta)
         next_states_cos = np.cos(next_states_theta)
-        # next_states_theta = np.arctan2(next_states_sin, next_states_cos)
 
         plt.quiver(states_x[1:], states_y[1:], -states_cos[1:], -states_sin[1:], color="green")
         plt.quiver(next_states_x[:-1], next_states_y[:-1], -next_states_cos[:-1], -next_states_sin[:-1], color="purple")
@@ -444,14 +441,6 @@ if __name__ == '__main__':
                         ha='center') # horizontal alignment can be left, right or center
 
         plt.show()
-
-    # n_actions = 2
-    # new_actions = actions
-    # for i in range(n_actions):
-    #     new_actions = np.append(new_actions[:-1], actions[i+1:], axis=-1)
-    # actions = new_actions
-    # states = states[n_actions:]
-    # next_states = next_states[n_actions:]
 
     train_states, test_states, train_actions, test_actions, train_next_states, test_next_states \
             = train_test_split(states, actions, next_states, test_size=0.1, random_state=args.seed)
@@ -536,10 +525,6 @@ if __name__ == '__main__':
     agent.model.eval()
     diffs = []
     pred_next_states = agent.get_prediction(test_states, test_actions)
-
-    # if args.scale:
-    #     pred_next_states = agent.model.output_scaler.inverse_transform(pred_next_states)
-    #     test_next_states = agent.model.output_scaler.inverse_transform(test_next_states)
     
     error = abs(pred_next_states - test_next_states)
     print("\nERROR MEAN:", error.mean(axis=0))
@@ -547,56 +532,50 @@ if __name__ == '__main__':
     print("ERROR MAX:", error.max(axis=0))
     print("ERROR MIN:", error.min(axis=0))
 
-    # diffs = abs(test_states - test_next_states)
-    diffs = abs(states - next_states)
+    diffs = abs(test_states - test_next_states)
     print("\nACTUAL MEAN:", diffs.mean(axis=0))
     print("ACTUAL STD:", diffs.std(axis=0))
-    # set_trace()
 
-    state = states[0]
-    slist = []
-    alist = []
-    l = 10
-    for i in range(120, 130):
-        action = actions[i]
-        slist.append(state.squeeze())
-        alist.append(action.squeeze())
-        state = agent.get_prediction(state, action)
+    for k in range(20):
+        slist = []
+        alist = []
+        start, end = 10 * k, 10 * k + 10
+        state = states[start]
+        for i in range(start, end):
+            action = actions[i]
+            slist.append(state.squeeze())
+            alist.append(action.squeeze())
+            state = agent.get_prediction(state, action)
 
-    slist = np.array(slist)
-    alist = np.array(alist)
-    
-    plt.quiver(slist[:, 0], slist[:, 1], -slist[:, 2], -slist[:, 3], color="green")
-    plt.quiver(states[:l, 0], states[:l, 1], -states[:l, 2], -states[:l, 3], color="purple")
-    plt.plot(slist[:, 0], slist[:, 1], color="green", linewidth=1.0)
-    plt.plot(states[:l, 0], states[:l, 1], color="purple", linewidth=1.0)
-
-    for i, (x, y) in enumerate(zip(slist[:, 0], slist[:, 1])):
-        plt.annotate(f"{i}", # this is the text
-                    (x,y), # these are the coordinates to position the label
-                    textcoords="offset points", # how to position the text
-                    xytext=(0,10), # distance from text to points (x,y)
-                    ha='center') # horizontal alignment can be left, right or center
+        slist = np.array(slist)
+        alist = np.array(alist)
         
-        # plt.annotate(str(actions_plot[i]), # this is the text
-        #             (x,y), # these are the coordinates to position the label
-        #             textcoords="offset points", # how to position the text
-        #             xytext=(-10,-10), # distance from text to points (x,y)
-        #             ha='center') # horizontal alignment can be left, right or center
+        plt.quiver(slist[:, 0], slist[:, 1], -slist[:, 2], -slist[:, 3], color="green")
+        plt.quiver(states[start:end, 0], states[start:end, 1], -states[start:end, 2], -states[start:end, 3], color="purple")
+        plt.plot(slist[:, 0], slist[:, 1], color="green", linewidth=1.0)
+        plt.plot(states[start:end, 0], states[start:end, 1], color="purple", linewidth=1.0)
 
-    for i, (x, y) in enumerate(zip(states[:l, 0], states[:l, 1])):
-        label = f"{i}"
-        plt.annotate(label, # this is the text
-                    (x,y), # these are the coordinates to position the label
-                    textcoords="offset points", # how to position the text
-                    xytext=(0,10), # distance from text to points (x,y)
-                    ha='center') # horizontal alignment can be left, right or center
+        for i, (x, y) in enumerate(zip(slist[:, 0], slist[:, 1])):
+            plt.annotate(f"{i}", # this is the text
+                        (x,y), # these are the coordinates to position the label
+                        textcoords="offset points", # how to position the text
+                        xytext=(0,10), # distance from text to points (x,y)
+                        ha='center') # horizontal alignment can be left, right or center
 
-    plt.show()
-    set_trace()
+        for i, (x, y) in enumerate(zip(states[start:end, 0], states[start:end, 1])):
+            label = f"{i}"
+            plt.annotate(label, # this is the text
+                        (x,y), # these are the coordinates to position the label
+                        textcoords="offset points", # how to position the text
+                        xytext=(0,10), # distance from text to points (x,y)
+                        ha='center') # horizontal alignment can be left, right or center
 
-    import sys
-    sys.exit(0)
+        plt.show()
+        set_trace()
+
+    if args.real:
+        import sys
+        sys.exit(0)
     
     state_range = np.array([MIN_STATE, MAX_STATE])
     action_range = np.array([MIN_ACTION, MAX_ACTION])
