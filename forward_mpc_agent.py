@@ -7,7 +7,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sympy import Q
 
 import torch
 from torch import nn
@@ -20,6 +19,7 @@ from time import time
 from sim.scripts.generate_data import *
 
 pi = torch.pi
+device = torch.device("cpu")
 
 def dcn(*args):
     ret = []
@@ -33,11 +33,11 @@ def to_device(*args):
         ret.append(arg.to(device))
     return ret if len(ret) > 1 else ret[0]
 
-def to_tensor(*args):
+def to_tensor(*args, requires_grad=True):
     ret = []
     for arg in args:
         if type(arg) == np.ndarray:
-            ret.append(tensor(arg.astype('float32'), requires_grad=True))
+            ret.append(tensor(arg.astype('float32'), requires_grad=requires_grad))
         else:
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
@@ -101,26 +101,16 @@ class DynamicsNetwork(nn.Module):
             dist = self(state, action)
             prediction = dist.rsample()
             if self.delta:
-                # pred_next_state = state + prediction
                 losses = self.loss_fn(state + prediction, next_state)
             else:
-                # pred_next_state = prediction
                 losses = self.loss_fn(prediction, next_state)
         else:
             if self.delta:
                 state_delta = self(state, action)
-                # pred_next_state = state + state_delta
                 losses = self.loss_fn(state + state_delta, next_state)
             else:
                 pred_next_state = self(state, action)
                 losses = self.loss_fn(pred_next_state, next_state)
-        # losses[:, :2] *= 4
-        # angle = torch.atan2(next_state[:, 2], next_state[:, 3])
-        # pred_angle = torch.atan2(pred_next_state[:, 2], pred_next_state[:, 3])
-        # angle_diff = (angle - pred_angle) % (2 * pi)
-        # pos_err = (next_state - pred_next_state)[:, :2].norm(dim=-1)
-        # angle_err = torch.stack((angle_diff, 2 * pi - angle_diff)).min(dim=0)[0]
-        # losses = 100 * pos_err + angle_err
         loss = losses.mean()
 
         self.optimizer.zero_grad()
@@ -146,7 +136,10 @@ class DynamicsNetwork(nn.Module):
                 states = states[None, :]
             if len(actions.shape) == 1:
                 actions = actions[None, :]
-            states_actions = np.append(states, actions, axis=-1)
+            try:
+                states_actions = np.append(states, actions, axis=-1)
+            except:
+                set_trace()
             states_actions_scaled = self.input_scaler.transform(states_actions)
             states_scaled = states_actions_scaled[:, :states.shape[-1]]
             actions_scaled = states_actions_scaled[:, states.shape[-1]:]
@@ -174,48 +167,56 @@ class MPCAgent:
         self.scale = scale
         self.time = 0
 
-    def mpc_action(self, state, init, goal, state_range, action_range, n_steps=10, n_samples=1000,
-                   swarm=False, swarm_weight=0.1, perp_weight=0.0, angle_weight=0.0, forward_weight=0.0):
-        state, init, goal, state_range = to_tensor(state, init, goal, state_range)
-        self.state = state
-        all_actions = torch.empty(n_steps, n_samples, self.action_dim).uniform_(*action_range)
+    def mpc_action(self, state, init, goal, prev_actions, state_range, action_range, swarm=False, n_steps=10, n_samples=1000,
+                   swarm_weight=0.0, perp_weight=0.4, heading_weight=0.17, forward_weight=0.0, dist_weight=1.0, norm_weight=0.1):
+        state, init, goal, prev_actions, state_range = to_tensor(state, init, goal, prev_actions, state_range)
+        self.state = state      # for multi-robot (swarming)
+        all_actions = torch.empty(n_steps, n_samples, 2).uniform_(*action_range)
         states = torch.tile(state, (n_samples, 1))
         goals = torch.tile(goal, (n_samples, 1))
-        states, all_actions, goals = to_tensor(states, all_actions, goals)
-        x1, y1, _ = init
-        x2, y2, _ = goal
-        vec_to_goal = (goal - init)[:-1]
+        prev_actions = torch.tile(prev_actions.flatten(), (n_samples, 1))
+        x1, y1, _, _ = init
+        x2, y2, _, _ = goal
+        vec_to_goal = (goal - init)[:2]
         optimal_dot = vec_to_goal / vec_to_goal.norm()
         perp_denom = vec_to_goal.norm()
         all_losses = torch.empty(n_steps, n_samples)
 
         for i in range(n_steps):
             actions = all_actions[i]
+            actions = torch.cat((prev_actions, actions), dim=-1)
             with torch.no_grad():
-                states = self.get_prediction(states, actions)
-            states = torch.clamp(states, *state_range)
+                states = to_tensor(self.get_prediction(states, actions), requires_grad=False)
+            states[:, 2:] = torch.clamp(states[:, 2:], -1., 1.)
 
-            x0, y0, _ = states.T
-            vecs_to_goal = (goals - states)[:, :-1]
-            actual_dot = vecs_to_goal.T / vecs_to_goal.norm(dim=-1)
+            # heading computations
+            x0, y0, sin_t, cos_t = states.T
+            vecs_to_goal = (goals - states)[:, :2]
+            actual_dot = (vecs_to_goal.T / vecs_to_goal.norm(dim=-1)).T
+            target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
+            target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0])
+            current_angle = torch.atan2(sin_t, cos_t)
+            angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
+            angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
+            angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
+            angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
             
-            dist_loss = torch.norm((goals - states)[:, :-1], dim=-1)
-            perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom / dist_loss.mean()
-            angle_loss = torch.arccos(torch.clamp(optimal_dot @ actual_dot, -1., 1.))
-            forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T)
-            swarm_loss = self.swarm_loss(states, goals) if swarm else 0
+            # compute losses
+            dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
+            heading_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0].squeeze()
+            perp_loss = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
+            forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
+            norm_loss = -all_actions[i].norm(dim=-1).squeeze() if i == 0 else 0.0
+            swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
 
-            perp_loss = perp_loss.reshape(dist_loss.shape)
-            angle_loss = angle_loss.reshape(dist_loss.shape)
-            forward_loss = forward_loss.reshape(dist_loss.shape)
-            print("perp:", perp_loss.mean(), "|| forward:", forward_loss.mean(), "|| dist:", dist_loss.mean())
-
-            all_losses[i] = dist_loss * 0 + forward_weight * forward_loss + perp_weight * perp_loss \
-                                + angle_weight * angle_loss + swarm_weight * swarm_loss
+            # normalize appropriate losses and compute total loss
+            norm_const = dist_loss.mean() / vec_to_goal.norm()
+            all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
+                                + swarm_weight * swarm_loss + norm_weight * norm_loss)
+                                + dist_weight * dist_loss + forward_weight * forward_loss
         
-        # best_idx = all_losses.sum(dim=0).argmin()
-        best_idx = all_losses[-1].argmin()
-        # import pdb;pdb.set_trace()
+        # find index of best trajectory and return corresponding first action
+        best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
     
     def get_prediction(self, states, actions, scale=True):
@@ -304,7 +305,6 @@ class MPCAgent:
             tqdm.write(f"{i}: mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
             self.model.train()
         
-        # self.model.optimizer.swap_swa_sgd()    
         self.model.eval()
         return training_losses, test_losses, test_idx, test_states, test_actions, test_next_states
 
